@@ -16,18 +16,18 @@ Security:
 """
 
 import asyncio
-import json
 import logging
 import os
-import re
-import time
-from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import httpx
 
 from tools.registry import registry, tool_error, tool_result
+from tools.a2a_security import (
+    audit,
+    filter_outbound,
+    sanitize_inbound,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,14 +49,6 @@ _call_timestamps: List[float] = []
 # Config helpers
 # ---------------------------------------------------------------------------
 
-def _get_hermes_home() -> Path:
-    try:
-        from hermes_constants import get_hermes_home
-        return get_hermes_home()
-    except ImportError:
-        return Path.home() / ".hermes"
-
-
 def _load_a2a_config() -> dict:
     try:
         from hermes_cli.config import load_config
@@ -76,68 +68,11 @@ def _check_a2a_available() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Security: audit logging
-# ---------------------------------------------------------------------------
-
-def _audit_log(event_type: str, data: dict) -> None:
-    try:
-        audit_path = _get_hermes_home() / "a2a_audit.jsonl"
-        entry = {
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "event": event_type,
-            **data,
-        }
-        with open(audit_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    except Exception:
-        logger.debug("Failed to write A2A audit log", exc_info=True)
-
-
-# ---------------------------------------------------------------------------
-# Security: outbound message filtering
-# ---------------------------------------------------------------------------
-
-_SENSITIVE_PATTERNS = [
-    re.compile(r"(?i)(api[_-]?key|secret|password|token|credential)\s*[:=]\s*\S+"),
-    re.compile(r"(?i)(sk-[a-zA-Z0-9]{20,})"),
-    re.compile(r"(?i)(ghp_[a-zA-Z0-9]{36,})"),
-    re.compile(r"(?i)(xoxb-[a-zA-Z0-9-]+)"),
-]
-
-
-def _filter_outbound(message: str) -> str:
-    filtered = message
-    for pattern in _SENSITIVE_PATTERNS:
-        filtered = pattern.sub("[REDACTED]", filtered)
-    return filtered
-
-
-# ---------------------------------------------------------------------------
-# Security: inbound response sanitization
-# ---------------------------------------------------------------------------
-
-def _sanitize_inbound(response_text: str) -> str:
-    if len(response_text) > _MAX_RESPONSE_SIZE:
-        response_text = response_text[:_MAX_RESPONSE_SIZE] + "\n[... truncated]"
-
-    injection_patterns = [
-        re.compile(r"(?i)<\s*system\s*>.*?<\s*/\s*system\s*>", re.DOTALL),
-        re.compile(r"(?i)\[INST\].*?\[/INST\]", re.DOTALL),
-        re.compile(r"(?i)ignore\s+(all\s+)?previous\s+instructions?"),
-        re.compile(r"(?i)you\s+are\s+now\s+"),
-        re.compile(r"(?i)new\s+system\s+prompt"),
-    ]
-    for pattern in injection_patterns:
-        response_text = pattern.sub("[FILTERED]", response_text)
-
-    return response_text
-
-
-# ---------------------------------------------------------------------------
-# Security: rate limiting
+# Rate limiting (outbound calls)
 # ---------------------------------------------------------------------------
 
 def _check_rate_limit() -> bool:
+    import time
     now = time.time()
     while _call_timestamps and _call_timestamps[0] < now - _RATE_LIMIT_WINDOW:
         _call_timestamps.pop(0)
@@ -145,6 +80,7 @@ def _check_rate_limit() -> bool:
 
 
 def _record_call() -> None:
+    import time
     _call_timestamps.append(time.time())
 
 
@@ -158,6 +94,28 @@ def _get_client() -> httpx.AsyncClient:
         follow_redirects=True,
         limits=httpx.Limits(max_connections=10),
     )
+
+
+# ---------------------------------------------------------------------------
+# Async execution helper
+# ---------------------------------------------------------------------------
+
+def _run_async(coro):
+    """Run an async coroutine from sync context, handling existing event loops."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        # We're inside an existing async context (e.g., gateway).
+        # Create a new thread to avoid blocking the event loop.
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(asyncio.run, coro)
+            return future.result(timeout=_DEFAULT_TIMEOUT + 5)
+    else:
+        return asyncio.run(coro)
 
 
 # ---------------------------------------------------------------------------
@@ -187,7 +145,7 @@ async def _send_task(
     if not task_id:
         task_id = str(uuid.uuid4())
 
-    filtered_message = _filter_outbound(message)
+    filtered_message = filter_outbound(message)
 
     payload = {
         "jsonrpc": "2.0",
@@ -257,9 +215,7 @@ def a2a_discover_handler(args: dict, **kwargs) -> str:
             return tool_error(f"Agent '{name}' not found in config. Use a2a_list to see configured agents.")
 
     try:
-        loop = asyncio.new_event_loop()
-        card = loop.run_until_complete(_fetch_agent_card(url))
-        loop.close()
+        card = _run_async(_fetch_agent_card(url))
     except httpx.HTTPStatusError as e:
         return tool_error(f"Failed to fetch Agent Card: HTTP {e.response.status_code}")
     except httpx.ConnectError:
@@ -267,7 +223,7 @@ def a2a_discover_handler(args: dict, **kwargs) -> str:
     except Exception as e:
         return tool_error(f"Discovery failed: {type(e).__name__}: {e}")
 
-    _audit_log("discover", {"url": url, "agent_name": card.get("name", "unknown")})
+    audit.log("discover", {"url": url, "agent_name": card.get("name", "unknown")})
 
     return tool_result(
         agent_name=card.get("name", "unknown"),
@@ -347,18 +303,16 @@ def a2a_call_handler(args: dict, **kwargs) -> str:
     endpoint = url.rstrip("/")
 
     _record_call()
-    _audit_log("call_outbound", {
+    audit.log("call_outbound", {
         "target": url,
         "message_length": len(message),
         "task_id": task_id,
     })
 
     try:
-        loop = asyncio.new_event_loop()
-        result = loop.run_until_complete(
+        result = _run_async(
             _send_task(endpoint, message, task_id=task_id, auth_token=auth_token)
         )
-        loop.close()
     except httpx.HTTPStatusError as e:
         return tool_error(f"Remote agent returned HTTP {e.response.status_code}")
     except httpx.ConnectError:
@@ -384,9 +338,9 @@ def a2a_call_handler(args: dict, **kwargs) -> str:
                     if part.get("type") == "text":
                         response_text += part.get("text", "") + "\n"
 
-    response_text = _sanitize_inbound(response_text.strip())
+    response_text = sanitize_inbound(response_text.strip())
 
-    _audit_log("call_inbound", {
+    audit.log("call_inbound", {
         "source": url,
         "task_state": task_state,
         "response_length": len(response_text),
@@ -433,7 +387,7 @@ def a2a_list_handler(args: dict, **kwargs) -> str:
                             "name": "friend-agent",
                             "url": "https://friend.example.com",
                             "description": "My friend's Hermes agent",
-                            "auth_token": "optional-token",
+                            "auth_token": "***",
                         }
                     ]
                 }

@@ -28,6 +28,18 @@ Remote Agent                        Your Hermes Gateway
 
 A2A runs as a gateway platform adapter — same level as Telegram or Discord. Messages go through the standard gateway pipeline.
 
+## Architecture
+
+This repo provides three components:
+
+| Component | Location | Purpose |
+|-----------|----------|---------|
+| **Security module** | `security/a2a_security.py` → `tools/a2a_security.py` | Shared security utilities (injection filtering, sensitive data redaction, rate limiting, audit logging) |
+| **Gateway adapter** | `gateway_adapter/a2a.py` → `gateway/platforms/a2a.py` | A2A HTTP server that routes messages into the existing session |
+| **Client tools** | `client_tools/a2a_tools.py` → `tools/a2a_tools.py` | `a2a_discover`, `a2a_call`, `a2a_list` tools |
+
+A corresponding [PR #11025](https://github.com/NousResearch/hermes-agent/pull/11025) proposes native integration into Hermes Agent.
+
 ## Install
 
 ```bash
@@ -96,22 +108,6 @@ A2A messages are routed to whichever platform your agent is on. Set the home cha
 | Slack | `SLACK_HOME_CHANNEL=channel_id` | Channel ID starts with `C` (find in channel details) |
 | Signal | `SIGNAL_HOME_CHANNEL=phone` | Your Signal phone number |
 
-Example for Telegram:
-
-```bash
-A2A_ENABLED=true
-A2A_PORT=8081
-TELEGRAM_HOME_CHANNEL=5448717161
-```
-
-Example for Discord:
-
-```bash
-A2A_ENABLED=true
-A2A_PORT=8081
-DISCORD_HOME_CHANNEL=1234567890
-```
-
 If multiple platforms have home channels set, priority is Telegram → Discord → Slack → Signal.
 
 ### Sending messages
@@ -132,13 +128,16 @@ Your agent gets three tools: `a2a_discover`, `a2a_call`, `a2a_list`.
 
 | Layer | What it does |
 |-------|-------------|
-| Auth | Optional Bearer token (`A2A_AUTH_TOKEN`) |
-| Rate limit | 20 req/min per client IP |
-| Inbound | Prompt injection patterns filtered |
+| Auth | Bearer token required (`A2A_AUTH_TOKEN`). Without token, only localhost allowed |
+| Rate limit | 20 req/min per client IP (thread-safe) |
+| Inbound | 7 prompt injection patterns filtered |
 | Outbound | API keys, tokens, emails redacted |
 | Privacy | Agent instructed not to share memory/diary/body |
 | Wakeup | A2A messages skip context injection |
 | Audit | All interactions logged to `~/.hermes/a2a_audit.jsonl` |
+| Task cache | Bounded to 1000 entries (prevents memory leaks) |
+
+All security utilities are in a single shared module (`security/a2a_security.py`) used by both the gateway adapter and client tools.
 
 ## Wakeup plugin
 
@@ -174,10 +173,8 @@ elif platform == Platform.A2A:
 
 ## Known limitations
 
-- Response capture uses send() monkey-patch — works but should be a proper gateway hook
 - No streaming (A2A spec supports SSE)
-- No multi-turn tracking via task_id
-- Agent Card skills are hardcoded
+- Agent Card skills are hardcoded defaults
 
 ## Requirements
 

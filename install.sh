@@ -15,6 +15,10 @@ fi
 
 echo "Installing hermes-a2a into $HERMES_DIR ..."
 
+# Copy shared security module
+cp "$SCRIPT_DIR/security/a2a_security.py" "$HERMES_DIR/tools/a2a_security.py"
+echo "  + tools/a2a_security.py"
+
 # Copy gateway adapter
 cp "$SCRIPT_DIR/gateway_adapter/a2a.py" "$HERMES_DIR/gateway/platforms/a2a.py"
 echo "  + gateway/platforms/a2a.py"
