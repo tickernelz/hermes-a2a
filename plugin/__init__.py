@@ -100,10 +100,16 @@ def _on_pre_llm_call(conversation_history=None, user_message=None, **kwargs):
             "metadata": task.metadata,
         }
 
+    _allowed_intents = {"action_request", "review", "consultation", "notification", "instruction", "unknown"}
+    _allowed_actions = {"reply", "forward", "acknowledge"}
+    _allowed_scopes = {"full", "partial", "minimal"}
     intent = task.metadata.get("intent", "unknown")
+    intent = intent if intent in _allowed_intents else "unknown"
     expected = task.metadata.get("expected_action", "reply")
+    expected = expected if expected in _allowed_actions else "reply"
     scope = task.metadata.get("context_scope", "full")
-    reply_to = task.metadata.get("reply_to_task_id", "")
+    scope = scope if scope in _allowed_scopes else "full"
+    reply_to = task.metadata.get("reply_to_task_id", "")[:64]
 
     header = f"[A2A inbound | task:{task.task_id} | intent:{intent} | expected:{expected} | scope:{scope}]"
     if reply_to:

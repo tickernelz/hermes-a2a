@@ -104,7 +104,7 @@ class TaskQueue:
             if task:
                 if task.response == "(canceled)":
                     return {"state": "canceled"}
-                return {"state": "completed", "response": task.response}
+                return {"state": "completed", "response": filter_outbound(task.response)}
         return {"state": "unknown"}
 
 
