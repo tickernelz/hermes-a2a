@@ -33,8 +33,70 @@ def register(ctx):
     ctx.register_hook("pre_llm_call", _on_pre_llm_call)
     ctx.register_hook("post_llm_call", _on_post_llm_call)
 
+    ctx.register_command("a2a", _handle_a2a_command, description="A2A protocol status and management")
+
     _start_server()
     logger.info("[A2A] Plugin loaded")
+
+
+def _handle_a2a_command(raw_args: str) -> str:
+    sub = raw_args.strip().lower()
+
+    if sub == "agents":
+        return _cmd_agents()
+    return _cmd_status()
+
+
+def _cmd_status() -> str:
+    host = os.getenv("A2A_HOST", DEFAULT_HOST)
+    port = int(os.getenv("A2A_PORT", str(DEFAULT_PORT)))
+    name = os.getenv("A2A_AGENT_NAME", "hermes-agent")
+    pending = task_queue.pending_count()
+
+    from .tools import _load_configured_agents
+    agent_count = len(_load_configured_agents())
+
+    lines = [
+        f"A2A Server: http://{host}:{port}",
+        f"Agent name: {name}",
+        f"Known agents: {agent_count}",
+        f"Pending tasks: {pending}",
+        f"Server thread: {'alive' if _server_thread and _server_thread.is_alive() else 'down'}",
+    ]
+    return "\n".join(lines)
+
+
+def _cmd_agents() -> str:
+    from pathlib import Path
+    from .tools import _load_configured_agents
+
+    agents = _load_configured_agents()
+    if not agents:
+        return "No agents configured. Add agents to ~/.hermes/config.yaml under a2a.agents"
+
+    conv_dir = Path.home() / ".hermes" / "a2a_conversations"
+    lines = []
+    for a in agents:
+        name = a.get("name", "unnamed")
+        url = a.get("url", "")
+        desc = a.get("description", "")
+        auth = "auth" if a.get("auth_token") else "open"
+
+        safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in name.lower())
+        agent_dir = conv_dir / safe
+        last_seen = "never"
+        if agent_dir.is_dir():
+            files = sorted(agent_dir.glob("*.md"), reverse=True)
+            if files:
+                last_seen = files[0].stem
+
+        line = f"  {name} ({auth}) — {url}"
+        if desc:
+            line += f"\n    {desc}"
+        line += f"\n    last contact: {last_seen}"
+        lines.append(line)
+
+    return "Configured agents:\n" + "\n".join(lines)
 
 
 def _start_server():
