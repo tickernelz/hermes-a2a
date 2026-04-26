@@ -18,10 +18,17 @@ if [ -d "$PLUGIN_DIR" ]; then
     cp -r "$PLUGIN_DIR" "$PLUGIN_DIR.bak.$(date +%Y%m%d%H%M%S)"
 fi
 
+DASHBOARD_DIR="$SCRIPT_DIR/dashboard"
+
 mkdir -p "$HOME/.hermes/plugins"
 cp -r "$SOURCE_DIR" "$PLUGIN_DIR"
 
-echo "Installed to $PLUGIN_DIR"
+if [ -d "$DASHBOARD_DIR" ]; then
+    cp -r "$DASHBOARD_DIR" "$PLUGIN_DIR/dashboard"
+    echo "Installed plugin + dashboard to $PLUGIN_DIR"
+else
+    echo "Installed plugin to $PLUGIN_DIR (no dashboard found)"
+fi
 echo ""
 echo "Add to ~/.hermes/.env:"
 echo "  A2A_ENABLED=true"

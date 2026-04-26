@@ -3,5 +3,7 @@ __pycache__/
 *.pyo
 .env
 *.egg-info/
-dist/
 build/
+
+# Ignore top-level dist/ but keep dashboard/dist/ (pre-built UI)
+/dist/

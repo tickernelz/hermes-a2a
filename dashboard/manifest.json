@@ -1,0 +1,14 @@
+{
+  "name": "a2a",
+  "label": "Messages",
+  "description": "A2A agent messaging — friends list, chat history, and direct messaging",
+  "icon": "MessageSquare",
+  "version": "1.0.0",
+  "tab": {
+    "path": "/messages",
+    "position": "after:sessions"
+  },
+  "entry": "dist/index.js",
+  "css": "dist/style.css",
+  "api": "plugin_api.py"
+}
