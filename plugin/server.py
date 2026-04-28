@@ -15,6 +15,7 @@ import os
 import threading
 import time
 import uuid
+import builtins
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from threading import Event, Lock
 from collections import OrderedDict
@@ -31,6 +32,7 @@ DEFAULT_PORT = 8081
 _TASK_CACHE_MAX = 1000
 _MAX_PENDING = 10
 _RESPONSE_TIMEOUT = 120  # seconds to wait for agent response
+_STATE_KEY = "_hermes_a2a_runtime_state"
 
 try:
     from hermes_cli import __version__ as HERMES_VERSION
@@ -110,7 +112,58 @@ class TaskQueue:
         return {"state": "unknown"}
 
 
-task_queue = TaskQueue()
+def _runtime_state() -> dict:
+    """Return process-wide A2A runtime state that survives plugin reloads."""
+    state = getattr(builtins, _STATE_KEY, None)
+    if not isinstance(state, dict):
+        state = {}
+        setattr(builtins, _STATE_KEY, state)
+
+    queue = state.get("task_queue")
+    if not _is_usable_task_queue(queue):
+        state["task_queue"] = TaskQueue()
+    state.setdefault("server", None)
+    state.setdefault("thread", None)
+    state.setdefault("owner_module", __name__)
+    return state
+
+
+def _is_usable_task_queue(queue) -> bool:
+    """Accept queue objects created before plugin reload changed class identity."""
+    return all(
+        callable(getattr(queue, name, None))
+        for name in (
+            "pending_count",
+            "enqueue",
+            "drain_pending",
+            "complete",
+            "cancel",
+            "get_status",
+        )
+    )
+
+
+task_queue = _runtime_state()["task_queue"]
+
+
+def get_runtime_state() -> dict:
+    """Expose the process-wide runtime state to the plugin loader."""
+    return _runtime_state()
+
+
+def set_runtime_server(server, thread) -> None:
+    state = _runtime_state()
+    state["server"] = server
+    state["thread"] = thread
+    state["owner_module"] = __name__
+
+
+def clear_runtime_server(server=None) -> None:
+    state = _runtime_state()
+    if server is not None and state.get("server") is not server:
+        return
+    state["server"] = None
+    state["thread"] = None
 
 
 def _trigger_webhook():
@@ -336,7 +389,7 @@ class A2AServer(ThreadingHTTPServer):
             "capabilities": {
                 "streaming": False,
                 "pushNotifications": False,
-                "multiTurn": True,
+                "multiTurn": False,
                 "structuredMetadata": True,
             },
             "skills": [

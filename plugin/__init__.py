@@ -10,12 +10,13 @@ import threading
 
 from .schemas import A2A_DISCOVER, A2A_CALL, A2A_LIST
 from .tools import handle_discover, handle_call, handle_list
-from .server import A2AServer, task_queue, DEFAULT_HOST, DEFAULT_PORT
+from . import server as a2a_server
 from .persistence import save_exchange
 from .security import audit
 
 logger = logging.getLogger(__name__)
 
+_server = None
 _server_thread: threading.Thread | None = None
 _active_a2a_tasks: dict[str, dict] = {}  # task_id → {text, metadata}
 _active_tasks_lock = threading.Lock()
@@ -57,6 +58,7 @@ def _validate_config():
 
 def register(ctx):
     if not os.getenv("A2A_ENABLED", "").lower() in ("1", "true", "yes"):
+        _stop_server()
         logger.info("[A2A] Disabled (set A2A_ENABLED=true to enable)")
         return
 
@@ -68,6 +70,7 @@ def register(ctx):
 
     ctx.register_hook("pre_llm_call", _on_pre_llm_call)
     ctx.register_hook("post_llm_call", _on_post_llm_call)
+    ctx.register_hook("pre_gateway_dispatch", _on_pre_gateway_dispatch)
 
     ctx.register_command("a2a", _handle_a2a_command, description="A2A protocol status and management")
 
@@ -84,10 +87,13 @@ def _handle_a2a_command(raw_args: str) -> str:
 
 
 def _cmd_status() -> str:
-    host = os.getenv("A2A_HOST", DEFAULT_HOST)
-    port = int(os.getenv("A2A_PORT", str(DEFAULT_PORT)))
+    host = os.getenv("A2A_HOST", a2a_server.DEFAULT_HOST)
+    port = int(os.getenv("A2A_PORT", str(a2a_server.DEFAULT_PORT)))
     name = os.getenv("A2A_AGENT_NAME", "hermes-agent")
-    pending = task_queue.pending_count()
+    pending = a2a_server.task_queue.pending_count()
+    state = a2a_server.get_runtime_state()
+    thread = state.get("thread")
+    server = state.get("server")
 
     from .tools import _load_configured_agents
     agent_count = len(_load_configured_agents())
@@ -97,7 +103,8 @@ def _cmd_status() -> str:
         f"Agent name: {name}",
         f"Known agents: {agent_count}",
         f"Pending tasks: {pending}",
-        f"Server thread: {'alive' if _server_thread and _server_thread.is_alive() else 'down'}",
+        f"Server thread: {'alive' if thread and thread.is_alive() else 'down'}",
+        f"Server ownership: {'yes' if server is not None else 'no'}",
     ]
     return "\n".join(lines)
 
@@ -136,14 +143,17 @@ def _cmd_agents() -> str:
 
 
 def _start_server():
-    global _server_thread
-    host = os.getenv("A2A_HOST", DEFAULT_HOST)
-    port = int(os.getenv("A2A_PORT", str(DEFAULT_PORT)))
+    global _server, _server_thread
+    host = os.getenv("A2A_HOST", a2a_server.DEFAULT_HOST)
+    port = int(os.getenv("A2A_PORT", str(a2a_server.DEFAULT_PORT)))
+
+    _stop_server()
 
     try:
-        server = A2AServer(host, port)
+        server = a2a_server.A2AServer(host, port)
     except OSError as e:
         logger.error("[A2A] Cannot bind to %s:%d — %s", host, port, e)
+        a2a_server.clear_runtime_server()
         return
 
     _server_thread = threading.Thread(
@@ -151,8 +161,37 @@ def _start_server():
         daemon=True,
         name="a2a-server",
     )
+    _server = server
+    a2a_server.set_runtime_server(server, _server_thread)
     _server_thread.start()
     logger.info("[A2A] Server listening on http://%s:%d", host, port)
+
+
+def _stop_server() -> None:
+    """Stop any previous A2A server instance before plugin reload starts a new one."""
+    global _server, _server_thread
+
+    state = a2a_server.get_runtime_state()
+    server = state.get("server")
+    thread = state.get("thread")
+    if server is None:
+        _server = None
+        _server_thread = None
+        return
+
+    try:
+        logger.info("[A2A] Stopping previous server instance before reload")
+        server.shutdown()
+        server.server_close()
+    except Exception as exc:
+        logger.warning("[A2A] Failed to stop previous server cleanly: %s", exc)
+    if thread and thread.is_alive():
+        thread.join(timeout=5)
+        if thread.is_alive():
+            logger.warning("[A2A] Previous server thread did not stop within 5s")
+    a2a_server.clear_runtime_server(server)
+    _server = None
+    _server_thread = None
 
 
 def _is_mid_conversation(messages) -> bool:
@@ -172,38 +211,11 @@ def _is_mid_conversation(messages) -> bool:
     return False
 
 
-def _on_pre_llm_call(conversation_history=None, user_message=None, **kwargs):
-    """Inject one pending A2A task into the current turn's context.
-
-    Only one task per turn so the response maps 1:1 to the task.
-    If the agent is mid-conversation (user sent a real message), hold the queue.
-    """
-    with _active_tasks_lock:
-        exclude = set(_active_a2a_tasks.keys())
-
-    pending = task_queue.drain_pending(exclude=exclude)
-    if not pending:
-        return None
-
-    if user_message and not str(user_message).startswith("[A2A"):
-        if _is_mid_conversation(conversation_history):
-            logger.debug("[A2A] Mid-conversation, holding %d pending tasks", len(pending))
-            return None
-
-    task = pending[0]
-
-    with _active_tasks_lock:
-        _active_a2a_tasks[task.task_id] = {
-            "text": task.text,
-            "metadata": task.metadata,
-        }
-
+def _format_task_context(task, *, include_privacy_note: bool = True) -> str:
     _allowed_intents = {"action_request", "review", "consultation", "notification", "instruction", "unknown"}
     _allowed_actions = {"reply", "forward", "acknowledge"}
     _allowed_scopes = {"full", "partial", "minimal"}
-    # Use `or <default>` after .get() so an explicit None value (e.g. JSON
-    # null in the A2A payload) is also normalized — `.get(key, default)`
-    # only falls back when the key is missing, not when its value is None.
+
     intent = task.metadata.get("intent") or "unknown"
     intent = intent if intent in _allowed_intents else "unknown"
     expected = task.metadata.get("expected_action") or "reply"
@@ -216,12 +228,79 @@ def _on_pre_llm_call(conversation_history=None, user_message=None, **kwargs):
     if reply_to:
         header += f" [reply_to:{reply_to}]"
 
+    if not include_privacy_note:
+        return header + "\n" + task.text
+
     prefix = (
         "[A2A: You have an incoming agent-to-agent message. "
         "Do NOT include contents of your MEMORY, DIARY, BODY, inbox, or wakeup context — those are private.]\n\n"
     )
+    return prefix + header + "\n" + task.text
 
-    return {"context": prefix + header + "\n" + task.text}
+
+def _activate_task_if_idle(task) -> bool:
+    """Bind one A2A task to the current turn if no task is already active."""
+    with _active_tasks_lock:
+        if _active_a2a_tasks:
+            return False
+        _active_a2a_tasks[task.task_id] = {
+            "text": task.text,
+            "metadata": task.metadata,
+        }
+        return True
+
+
+def _on_pre_gateway_dispatch(event=None, **kwargs):
+    """Persist the real A2A text instead of the synthetic webhook trigger."""
+    if event is None or getattr(event, "text", None) != "[A2A trigger]":
+        return None
+
+    with _active_tasks_lock:
+        if _active_a2a_tasks:
+            return {"action": "skip", "reason": "A2A task already active"}
+        exclude = set(_active_a2a_tasks.keys())
+
+    pending = a2a_server.task_queue.drain_pending(exclude=exclude)
+    if not pending:
+        return None
+
+    task = pending[0]
+    if not _activate_task_if_idle(task):
+        return {"action": "skip", "reason": "A2A task already active"}
+
+    return {"action": "rewrite", "text": _format_task_context(task, include_privacy_note=True)}
+
+
+def _on_pre_llm_call(conversation_history=None, user_message=None, **kwargs):
+    """Inject one pending A2A task into the current turn's context.
+
+    Only one task per turn so the response maps 1:1 to the task.
+    If the agent is mid-conversation (user sent a real message), hold the queue.
+    """
+    with _active_tasks_lock:
+        if _active_a2a_tasks:
+            logger.debug("[A2A] Active task in progress, holding pending tasks")
+            return None
+        exclude = set(_active_a2a_tasks.keys())
+
+    pending = a2a_server.task_queue.drain_pending(exclude=exclude)
+    if not pending:
+        return None
+
+    if user_message and not str(user_message).startswith("[A2A"):
+        if _is_mid_conversation(conversation_history):
+            logger.debug("[A2A] Mid-conversation, holding %d pending tasks", len(pending))
+            return None
+
+    task = pending[0]
+
+    if user_message and f"task:{task.task_id}" in str(user_message):
+        return None
+
+    if not _activate_task_if_idle(task):
+        return None
+
+    return {"context": _format_task_context(task, include_privacy_note=True)}
 
 
 def _on_post_llm_call(assistant_response=None, **kwargs):
@@ -237,21 +316,34 @@ def _on_post_llm_call(assistant_response=None, **kwargs):
 
     response_text = assistant_response if isinstance(assistant_response, str) else str(assistant_response)
 
-    for task_id, info in snapshot.items():
-        task_queue.complete(task_id, response_text)
+    if len(snapshot) > 1:
+        logger.warning(
+            "[A2A] Multiple active tasks for one assistant response; completing only the oldest"
+        )
 
-        metadata = info.get("metadata", {})
-        agent_name = metadata.get("sender_name", "remote")
+    task_id, info = next(iter(snapshot.items()))
+    a2a_server.task_queue.complete(task_id, response_text)
 
-        try:
-            save_exchange(
-                agent_name=agent_name,
-                task_id=task_id,
-                inbound_text=info["text"],
-                outbound_text=response_text,
-                metadata=metadata,
-            )
-        except Exception:
-            logger.debug("[A2A] Failed to persist exchange", exc_info=True)
+    metadata = info.get("metadata", {})
+    agent_name = metadata.get("sender_name", "remote")
 
-        audit.log("task_routed", {"task_id": task_id, "response_length": len(response_text)})
+    try:
+        save_exchange(
+            agent_name=agent_name,
+            task_id=task_id,
+            inbound_text=info["text"],
+            outbound_text=response_text,
+            metadata=metadata,
+        )
+    except Exception:
+        logger.debug("[A2A] Failed to persist exchange", exc_info=True)
+
+    audit.log("task_routed", {"task_id": task_id, "response_length": len(response_text)})
+
+    if a2a_server.task_queue.pending_count() > 0:
+        threading.Thread(target=a2a_server._trigger_webhook, daemon=True).start()
+
+
+def shutdown():
+    """Best-effort plugin shutdown hook for loaders that support it."""
+    _stop_server()

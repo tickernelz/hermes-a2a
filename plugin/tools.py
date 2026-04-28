@@ -8,6 +8,7 @@ import time
 import uuid
 from collections import deque
 from typing import Any, Dict, List
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -29,12 +30,54 @@ def _load_configured_agents() -> List[Dict[str, Any]]:
         return []
 
 
-def _check_rate_limit() -> bool:
+def _consume_rate_limit() -> bool:
     now = time.time()
     with _rate_lock:
         while _call_timestamps and _call_timestamps[0] < now - _RATE_LIMIT_WINDOW:
             _call_timestamps.popleft()
-        return len(_call_timestamps) < _RATE_LIMIT_MAX_CALLS
+        if len(_call_timestamps) >= _RATE_LIMIT_MAX_CALLS:
+            return False
+        _call_timestamps.append(now)
+        return True
+
+
+def _normalize_url(url: str) -> str:
+    return (url or "").strip().rstrip("/")
+
+
+def _validate_target_url(url: str) -> str:
+    url = _normalize_url(url)
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError("A2A URL must be an http(s) URL")
+    return url
+
+
+def _resolve_target(name: str, url: str) -> tuple[str, str]:
+    """Resolve an outbound target and only allow configured raw URLs by default."""
+    agents = _load_configured_agents()
+    auth_token = ""
+
+    if name and not url:
+        for agent in agents:
+            if agent.get("name", "").lower() == name.lower():
+                return _validate_target_url(agent.get("url", "")), agent.get("auth_token", "")
+        raise ValueError(f"Agent '{name}' not found in config")
+
+    url = _validate_target_url(url)
+    for agent in agents:
+        configured_url = _normalize_url(agent.get("url", ""))
+        if configured_url and configured_url == url:
+            auth_token = agent.get("auth_token", "")
+            break
+    else:
+        if os.getenv("A2A_ALLOW_UNCONFIGURED_URLS", "").lower() not in ("1", "true", "yes"):
+            raise ValueError(
+                "Direct A2A URL is not configured; use a configured agent name "
+                "or set A2A_ALLOW_UNCONFIGURED_URLS=true"
+            )
+
+    return url, auth_token
 
 
 def _ok(data: dict) -> str:
@@ -80,15 +123,10 @@ def handle_discover(args: dict, **kwargs) -> str:
     if not url and not name:
         return _err("Provide either 'url' or 'name'")
 
-    auth_token = None
-    if name and not url:
-        for agent in _load_configured_agents():
-            if agent.get("name", "").lower() == name.lower():
-                url = agent.get("url", "")
-                auth_token = agent.get("auth_token", "")
-                break
-        if not url:
-            return _err(f"Agent '{name}' not found in config. Use a2a_list to see configured agents.")
+    try:
+        url, auth_token = _resolve_target(name, url)
+    except ValueError as e:
+        return _err(str(e))
 
     headers = {}
     if auth_token:
@@ -132,21 +170,13 @@ def handle_call(args: dict, **kwargs) -> str:
     if not url and not name:
         return _err("Provide either 'url' or 'name'")
 
-    if not _check_rate_limit():
+    if not _consume_rate_limit():
         return _err(f"Rate limit exceeded: max {_RATE_LIMIT_MAX_CALLS} calls per {_RATE_LIMIT_WINDOW}s")
 
-    auth_token = None
-    if name and not url:
-        for agent in _load_configured_agents():
-            if agent.get("name", "").lower() == name.lower():
-                url = agent.get("url", "")
-                auth_token = agent.get("auth_token", "")
-                break
-        if not url:
-            return _err(f"Agent '{name}' not found in config")
-
-    with _rate_lock:
-        _call_timestamps.append(time.time())
+    try:
+        url, auth_token = _resolve_target(name, url)
+    except ValueError as e:
+        return _err(str(e))
     # filter_outbound: strip sensitive data from what we send out
     filtered_message = filter_outbound(message)
 

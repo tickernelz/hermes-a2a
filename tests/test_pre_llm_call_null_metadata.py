@@ -34,7 +34,7 @@ def _make_task(metadata):
 def _patch_queue_with_task(monkeypatch, task):
     fake_q = MagicMock()
     fake_q.drain_pending.return_value = [task]
-    monkeypatch.setattr(a2a_plugin, "task_queue", fake_q)
+    monkeypatch.setattr(a2a_plugin.a2a_server, "task_queue", fake_q)
     a2a_plugin._active_a2a_tasks.clear()
 
 
