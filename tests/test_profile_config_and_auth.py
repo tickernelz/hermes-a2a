@@ -11,6 +11,29 @@ sys.path.insert(0, str(ROOT))
 from plugin import config, paths, persistence, security, server, tools  # noqa: E402
 
 
+class LegacyQueue:
+    def pending_count(self):
+        return 0
+
+    def enqueue(self, task_id, text, metadata):
+        return None
+
+    def drain_pending(self, exclude=None):
+        return []
+
+    def mark_processing(self, task_id):
+        return None
+
+    def complete(self, task_id, response):
+        return None
+
+    def cancel(self, task_id):
+        return None
+
+    def get_status(self, task_id):
+        return {"state": "unknown"}
+
+
 def test_profile_paths_follow_hermes_home(monkeypatch, tmp_path):
     profile_home = tmp_path / "profiles" / "yanto"
     monkeypatch.setenv("HERMES_HOME", str(profile_home))
@@ -133,6 +156,28 @@ def test_task_queue_drain_excludes_processing_tasks():
     pending = queue.drain_pending()
     assert [task.task_id for task in pending] == ["task-2"]
     assert queue.get_status("task-1") == {"state": "processing"}
+
+
+def test_task_queue_get_pending_returns_only_non_processing_pending_task():
+    queue = server.TaskQueue()
+    task = queue.enqueue("task-1", "first", {})
+    queue.enqueue("task-2", "second", {})
+
+    assert queue.get_pending("task-1") is task
+
+    queue.mark_processing("task-1")
+
+    assert queue.get_pending("task-1") is None
+    assert queue.get_pending("missing") is None
+
+
+def test_legacy_runtime_queue_without_get_pending_is_still_usable():
+    assert server._is_usable_task_queue(LegacyQueue()) is True
+
+
+def test_get_pending_fallback_supports_legacy_queue_without_replacement():
+    legacy = LegacyQueue()
+    assert server._get_pending_task(legacy, "task-1") is None
 
 
 def test_inbound_auth_fail_closed_when_required_without_token():

@@ -251,8 +251,20 @@ def _activate_task_if_idle(task) -> bool:
         return True
 
 
+def _task_id_from_event(event) -> str:
+    raw = getattr(event, "raw_message", None)
+    if not isinstance(raw, dict):
+        return ""
+    value = raw.get("task_id")
+    if value is None:
+        value = raw.get("id")
+    if value is None:
+        return ""
+    return str(value).strip()[:96]
+
+
 def _on_pre_gateway_dispatch(event=None, **kwargs):
-    """Persist the real A2A text instead of the synthetic webhook trigger."""
+    """Route synthetic webhook triggers to queued A2A task text only."""
     if event is None or getattr(event, "text", None) != "[A2A trigger]":
         return None
 
@@ -261,11 +273,19 @@ def _on_pre_gateway_dispatch(event=None, **kwargs):
             return {"action": "skip", "reason": "A2A task already active"}
         exclude = set(_active_a2a_tasks.keys())
 
-    pending = a2a_server.task_queue.drain_pending(exclude=exclude)
-    if not pending:
-        return None
+    requested_task_id = _task_id_from_event(event)
+    task = None
+    if requested_task_id:
+        task = a2a_server._get_pending_task(a2a_server.task_queue, requested_task_id)
+        if not task:
+            logger.debug("[A2A] Requested webhook task %s is not pending; falling back to queue", requested_task_id)
 
-    task = pending[0]
+    if task is None:
+        pending = a2a_server.task_queue.drain_pending(exclude=exclude)
+        if not pending:
+            return None
+        task = pending[0]
+
     if not _activate_task_if_idle(task):
         return {"action": "skip", "reason": "A2A task already active"}
     a2a_server.task_queue.mark_processing(task.task_id)

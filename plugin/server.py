@@ -99,6 +99,12 @@ class TaskQueue:
             skip = set(exclude or ()) | self._processing
             return [t for t in self._pending.values() if t.task_id not in skip]
 
+    def get_pending(self, task_id: str) -> _PendingTask | None:
+        with self._lock:
+            if task_id in self._processing:
+                return None
+            return self._pending.get(task_id)
+
     def mark_processing(self, task_id: str) -> None:
         with self._lock:
             task = self._pending.get(task_id)
@@ -188,6 +194,17 @@ def _is_usable_task_queue(queue) -> bool:
 
 
 task_queue = _runtime_state()["task_queue"]
+
+
+def _get_pending_task(queue, task_id: str):
+    getter = getattr(queue, "get_pending", None)
+    if callable(getter):
+        return getter(task_id)
+    pending = queue.drain_pending(exclude=set())
+    for task in pending:
+        if getattr(task, "task_id", None) == task_id:
+            return task
+    return None
 
 
 def get_runtime_state() -> dict:
