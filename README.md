@@ -72,55 +72,51 @@ The first version sent the agent's entire private files — diary, memory, body 
 
 ## Install
 
+Install is profile-local. Set `HERMES_HOME` explicitly so the plugin only touches the intended Hermes profile; the installer refuses to run without it.
+
 ```bash
 git clone https://github.com/iamagenius00/hermes-a2a.git
 cd hermes-a2a
-./install.sh
+HERMES_HOME=/path/to/hermes/profile ./install.sh --dry-run
+HERMES_HOME=/path/to/hermes/profile ./install.sh
 ```
 
-Seven files copied to `~/.hermes/plugins/a2a/`. Doesn't touch Hermes source code. Switching git branches won't break it.
+The installer is idempotent and backs up existing plugin/config/env files before mutating them. It does not restart Hermes.
 
-Add to `~/.hermes/.env`:
+What it changes inside the selected `HERMES_HOME` only:
+
+- copies `plugin/` and `dashboard/` to `plugins/a2a/`
+- appends missing `.env` keys such as `A2A_ENABLED`, `A2A_AUTH_TOKEN`, `A2A_WEBHOOK_SECRET`, and `WEBHOOK_ENABLED`
+- enables `plugins.enabled: [a2a]`
+- adds `a2a` to `platform_toolsets.<platform>` and `known_plugin_toolsets.<platform>` when `A2A_HOME_PLATFORM` is provided
+- adds the signed `a2a_trigger` webhook route
+
+The webhook signing secret is intentionally present in both places: `.env` as `A2A_WEBHOOK_SECRET` for the plugin signer, and `config.yaml` as the `a2a_trigger.secret` value for Hermes webhook validation. Keep those values identical. Remote agent bearer tokens should use `auth_token_env` and stay in `.env`, not inline in `config.yaml`.
+- writes `a2a.server`, `a2a.security`, and optional configured remote agents
+
+Example for a Discord-backed local profile:
 
 ```bash
-A2A_ENABLED=true
-A2A_PORT=8081
-# For non-localhost access:
-# A2A_AUTH_TOKEN=***
-# For instant wake:
-# A2A_WEBHOOK_SECRET=***
+HERMES_HOME=/home/you/.hermes \
+A2A_PORT=8081 \
+A2A_PUBLIC_URL=http://127.0.0.1:8081 \
+A2A_AGENT_NAME=jono \
+A2A_HOME_PLATFORM=discord \
+A2A_HOME_CHAT_TYPE=group \
+A2A_HOME_CHAT_ID=1499028849261023322 \
+A2A_HOME_USER_ID=287600440659410944 \
+A2A_HOME_USER_NAME=Zhafron \
+A2A_REMOTE_NAME=yanto_coder \
+A2A_REMOTE_URL=http://127.0.0.1:8082 \
+A2A_REMOTE_TOKEN_ENV=A2A_AGENT_YANTO_TOKEN \
+./install.sh --dry-run
 ```
 
-Add webhook route to `~/.hermes/config.yaml`:
+If the dry run looks correct, run the same command without `--dry-run`, review the changed files, then restart only the target Hermes gateway.
 
-```yaml
-webhook:
-  routes:
-    a2a_trigger:
-      secret: "<generate-a-random-secret>"  # must match A2A_WEBHOOK_SECRET
-      deliver: telegram  # or discord, slack, etc.
-      deliver_extra:
-        chat_id: '<your-chat-id>'
-      prompt: '[A2A trigger]'
-      source:
-        platform: telegram
-        chat_type: dm
-        chat_id: '<your-chat-id>'
-        user_id: '<your-user-id>'
-        user_name: '<your-name>'
-```
+For a complete profile-safe setup pattern, see [`docs/profile-install.md`](docs/profile-install.md).
 
-The `source` block is critical — it routes A2A messages into your **main chat session** instead of creating throwaway webhook sessions. Without it, the agent spawns an isolated session per message and loses all conversation context.
-
-The `deliver` + `deliver_extra` fields ensure the agent's reply gets sent to your chat, so you can see A2A conversations happening in real time.
-
-Restart:
-
-```bash
-hermes gateway run --replace
-```
-
-Look for `A2A server listening on http://127.0.0.1:8081` in the logs.
+The `source` block in the webhook route is critical — it routes A2A messages into your main chat session instead of creating throwaway webhook sessions.
 
 ## Usage
 

@@ -1,23 +1,88 @@
-# Add this to ~/.hermes/config.yaml to configure A2A remote agents
-# (for the client tools: a2a_discover, a2a_call, a2a_list)
+# Profile-local A2A configuration example.
+# Put this in the target profile config.yaml, not in a sibling profile.
+
+plugins:
+  enabled:
+    - a2a
+
+platform_toolsets:
+  discord:
+    - hermes-discord
+    - a2a
+
+known_plugin_toolsets:
+  discord:
+    - a2a
 
 a2a:
+  enabled: true
+  server:
+    host: 127.0.0.1
+    port: 8081
+    public_url: http://127.0.0.1:8081
+    require_auth: true
+  security:
+    allow_unconfigured_urls: false
+    redact_outbound: true
+    max_message_chars: 50000
+    max_response_chars: 100000
+    rate_limit_per_minute: 20
   agents:
-    - name: "friend"
-      url: "http://friend-address:8081"
-      description: "My friend's agent"
-      auth_token: ""  # optional
+    - name: yanto_coder
+      url: http://127.0.0.1:8082
+      description: Yanto Coder Hermes profile
+      auth_token_env: A2A_AGENT_YANTO_TOKEN
+      enabled: true
+      tags: [local, coder]
+      trust_level: trusted
 
-    - name: "colleague"
-      url: "http://colleague-address:8081"
-      description: "My colleague's agent"
-      auth_token: "shared-secret"
-# Inbound auth is configured via env var A2A_AUTH_TOKEN in ~/.hermes/.env
-# (not in config.yaml — the adapter reads from env directly)
+webhook:
+  enabled: true
+  extra:
+    port: 8644
+    routes:
+      a2a_trigger:
+        secret: <same random value as A2A_WEBHOOK_SECRET in .env>
+        deliver: discord
+        deliver_extra:
+          chat_id: '1499028849261023322'
+        prompt: '[A2A trigger]'
+        source:
+          platform: discord
+          chat_type: group
+          chat_id: '1499028849261023322'
+          user_id: '287600440659410944'
+          user_name: Zhafron
 
 
-# Add this to ~/.hermes/.env to enable A2A as a gateway platform
+# Note: Hermes webhook validation reads the route secret from config.yaml,
+# while the A2A plugin uses A2A_WEBHOOK_SECRET from .env when signing the
+# internal wake request. They must match exactly.
 
+platforms:
+  webhook:
+    extra:
+      routes:
+        a2a_trigger:
+          secret: <same random value as A2A_WEBHOOK_SECRET in .env>
+          deliver: discord
+          deliver_extra:
+            chat_id: '1499028849261023322'
+          prompt: '[A2A trigger]'
+          source:
+            platform: discord
+            chat_type: group
+            chat_id: '1499028849261023322'
+            user_id: '287600440659410944'
+            user_name: Zhafron
+
+# Matching .env values for this profile:
 # A2A_ENABLED=true
+# A2A_HOST=127.0.0.1
 # A2A_PORT=8081
-# A2A_AUTH_TOKEN=your-secret  # optional
+# A2A_PUBLIC_URL=http://127.0.0.1:8081
+# A2A_REQUIRE_AUTH=true
+# A2A_AUTH_TOKEN=<random secret for inbound calls to this profile>
+# A2A_WEBHOOK_SECRET=<random secret used by webhook route>
+# A2A_AGENT_YANTO_TOKEN=<token expected by yanto_coder>
+# WEBHOOK_ENABLED=true
