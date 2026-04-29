@@ -26,6 +26,7 @@ a2a:
     redact_outbound: true
     max_message_chars: 50000
     max_response_chars: 100000
+    max_request_bytes: 1048576
     rate_limit_per_minute: 20
   agents:
     - name: reviewer_agent
@@ -39,7 +40,7 @@ a2a:
 webhook:
   enabled: true
   extra:
-    port: 8644
+    port: 47644
     routes:
       a2a_trigger:
         secret: <same random value as A2A_WEBHOOK_SECRET in .env>
@@ -60,7 +61,9 @@ webhook:
 
 platforms:
   webhook:
+    enabled: true
     extra:
+      port: 47644
       routes:
         a2a_trigger:
           secret: <same random value as A2A_WEBHOOK_SECRET in .env>
@@ -85,3 +88,4 @@ platforms:
 # A2A_WEBHOOK_SECRET=<secret used by webhook route>
 # A2A_AGENT_REVIEWER_TOKEN=<secret expected by reviewer_agent>
 # WEBHOOK_ENABLED=true
+# WEBHOOK_PORT=47644

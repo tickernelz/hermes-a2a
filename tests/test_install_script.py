@@ -32,6 +32,7 @@ def run_install(home: Path | None, *args: str, **env_overrides):
         "A2A_HOME_CHAT_ID": "123456789012345678",
         "A2A_HOME_USER_ID": "234567890123456789",
         "A2A_HOME_USER_NAME": "Example User",
+        "WEBHOOK_PORT": "19044",
     })
     env.update(env_overrides)
     return subprocess.run(
@@ -178,6 +179,9 @@ webhook:
     assert cfg["known_plugin_toolsets"]["discord"].count("a2a") == 1
     route = cfg["webhook"]["extra"]["routes"]["a2a_trigger"]
     assert route["secret"]
+    assert cfg["webhook"]["extra"]["port"] == 19044
+    assert cfg["platforms"]["webhook"]["enabled"] is True
+    assert cfg["platforms"]["webhook"]["extra"]["port"] == 19044
     assert route["secret"] == cfg["platforms"]["webhook"]["extra"]["routes"]["a2a_trigger"]["secret"]
     assert route["prompt"] == "[A2A trigger]"
     assert route["deliver"] == "discord"
@@ -211,11 +215,54 @@ webhook:
         "A2A_PUBLIC_URL",
         "A2A_AGENT_REVIEWER_TOKEN",
         "WEBHOOK_ENABLED",
+        "WEBHOOK_PORT",
     ]:
         assert env_text.count(f"{key}=") == 1
     assert "EXISTING=1" in env_text
     assert (sibling / "config.yaml").read_text(encoding="utf-8") == "sibling: untouched\n"
     assert (sibling / ".env").read_text(encoding="utf-8") == "SIBLING=untouched\n"
+
+
+def test_install_auto_chooses_distinct_webhook_port_for_named_profile(tmp_path):
+    root_home = tmp_path / ".hermes"
+    default_home = root_home
+    profile_home = root_home / "profiles" / "reviewer"
+    default_home.mkdir(parents=True)
+    profile_home.mkdir(parents=True)
+    (default_home / "config.yaml").write_text("plugins: {}\n", encoding="utf-8")
+    (profile_home / "config.yaml").write_text("plugins: {}\n", encoding="utf-8")
+
+    default_result = run_install(default_home, WEBHOOK_PORT="", A2A_WEBHOOK_PORT="")
+    profile_result = run_install(None, "--profile", "reviewer", HOME=str(tmp_path), WEBHOOK_PORT="", A2A_WEBHOOK_PORT="")
+
+    assert default_result.returncode == 0, default_result.stderr
+    assert profile_result.returncode == 0, profile_result.stderr
+    default_cfg = read_config(default_home)
+    profile_cfg = read_config(profile_home)
+    assert default_cfg["platforms"]["webhook"]["extra"]["port"] == 47644
+    assert profile_cfg["platforms"]["webhook"]["extra"]["port"] != 47644
+    assert profile_cfg["platforms"]["webhook"]["extra"]["port"] == int(
+        next(line.split("=", 1)[1] for line in (profile_home / ".env").read_text(encoding="utf-8").splitlines() if line.startswith("WEBHOOK_PORT="))
+    )
+
+
+def test_install_preserves_existing_webhook_port_when_env_not_set(tmp_path):
+    home = tmp_path / "profile"
+    home.mkdir()
+    (home / "config.yaml").write_text("""
+platforms:
+  webhook:
+    extra:
+      port: 19191
+""".lstrip(), encoding="utf-8")
+
+    result = run_install(home, WEBHOOK_PORT="", A2A_WEBHOOK_PORT="")
+
+    assert result.returncode == 0, result.stderr
+    cfg = read_config(home)
+    assert cfg["webhook"]["extra"]["port"] == 19191
+    assert cfg["platforms"]["webhook"]["extra"]["port"] == 19191
+    assert "WEBHOOK_PORT=19191" in (home / ".env").read_text(encoding="utf-8")
 
 
 def test_uninstall_is_profile_safe_and_supports_dry_run(tmp_path):

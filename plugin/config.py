@@ -67,6 +67,7 @@ class SecurityConfig:
     allow_unconfigured_urls: bool
     max_message_chars: int
     max_response_chars: int
+    max_request_bytes: int
     rate_limit_per_minute: int
 
 
@@ -101,6 +102,7 @@ def get_security_config(config: dict[str, Any] | None = None) -> SecurityConfig:
         ),
         max_message_chars=_int(security.get("max_message_chars"), 50_000),
         max_response_chars=_int(security.get("max_response_chars"), 100_000),
+        max_request_bytes=_int(security.get("max_request_bytes"), 1_048_576),
         rate_limit_per_minute=_int(security.get("rate_limit_per_minute"), 20),
     )
 

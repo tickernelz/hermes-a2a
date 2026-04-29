@@ -526,13 +526,13 @@ def _get_dashboard_route() -> tuple[str, str]:
         webhook_cfg = cfg.get("platforms", {}).get("webhook", {}).get("extra", {})
         if not webhook_cfg:
             webhook_cfg = cfg.get("webhook", {}).get("extra", {})
-        port = int(webhook_cfg.get("port", 8644))
+        port = int(webhook_cfg.get("port", 47644))
         routes = webhook_cfg.get("routes", {})
         route = routes.get("a2a_dashboard", {})
         secret = route.get("secret") or webhook_cfg.get("secret", "")
         return f"http://127.0.0.1:{port}/webhooks/a2a_dashboard", secret
     except Exception:
-        return "http://127.0.0.1:8644/webhooks/a2a_dashboard", ""
+        return "http://127.0.0.1:47644/webhooks/a2a_dashboard", ""
 
 
 def _find_exchange(agent_name: str, task_id: str, days: int = 3) -> dict | None:

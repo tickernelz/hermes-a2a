@@ -233,7 +233,7 @@ def _trigger_webhook(task_id: str = ""):
     if not secret:
         return
 
-    port = int(os.getenv("WEBHOOK_PORT", "8644"))
+    port = int(os.getenv("WEBHOOK_PORT", "47644"))
     body = json.dumps({"event_type": "a2a_inbound", "task_id": task_id}).encode()
     sig = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
 
@@ -333,10 +333,10 @@ class A2ARequestHandler(BaseHTTPRequestHandler):
             )
             return
 
-        if length <= 0 or length > 65536:
+        if length <= 0 or length > self.server.max_request_bytes:
             self._send_json(
-                {"jsonrpc": "2.0", "error": {"code": -32600, "message": f"Content-Length must be 1-65536, got {length}"}, "id": None},
-                413 if length > 65536 else 400,
+                {"jsonrpc": "2.0", "error": {"code": -32600, "message": f"Content-Length must be 1-{self.server.max_request_bytes}, got {length}"}, "id": None},
+                413 if length > self.server.max_request_bytes else 400,
             )
             return
 
@@ -465,6 +465,7 @@ class A2AServer(ThreadingHTTPServer):
         self.require_auth = server_cfg.require_auth
         self.public_url = server_cfg.public_url
         self.max_message_chars = security_cfg.max_message_chars
+        self.max_request_bytes = security_cfg.max_request_bytes
         self.limiter = RateLimiter(max_requests=security_cfg.rate_limit_per_minute)
         if self.require_auth and not self.auth_token:
             logger.warning("[A2A] A2A_REQUIRE_AUTH is enabled but A2A_AUTH_TOKEN is missing; POST requests will be rejected")

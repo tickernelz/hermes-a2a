@@ -151,6 +151,8 @@ export A2A_REMOTE_NAME="${A2A_REMOTE_NAME:-}"
 export A2A_REMOTE_URL="${A2A_REMOTE_URL:-}"
 export A2A_REMOTE_DESCRIPTION="${A2A_REMOTE_DESCRIPTION:-}"
 export A2A_REMOTE_TOKEN_ENV="${A2A_REMOTE_TOKEN_ENV:-}"
+export A2A_WEBHOOK_PORT="${A2A_WEBHOOK_PORT:-}"
+export WEBHOOK_PORT="${WEBHOOK_PORT:-${A2A_WEBHOOK_PORT}}"
 
 "$PYTHON" <<'PY'
 from __future__ import annotations
@@ -253,10 +255,48 @@ def bool_env(name: str, default: bool = False) -> bool:
 
 def ensure_env(lines: list[str], key: str, value: str) -> None:
     prefix = f"{key}="
-    if any(line.startswith(prefix) for line in lines):
-        return
+    for index, line in enumerate(lines):
+        if line.startswith(prefix):
+            lines[index] = f"{key}={value}"
+            return
     lines.append(f"{key}={value}")
 
+
+
+def choose_webhook_port(home: Path, config: dict, existing_env: list[str]) -> int:
+    raw = os.environ.get("WEBHOOK_PORT", "").strip()
+    if raw:
+        return int(raw)
+
+    for section_path in (("platforms", "webhook", "extra"), ("webhook", "extra")):
+        current = config
+        for key in section_path:
+            current = current.get(key) if isinstance(current, dict) else None
+        if isinstance(current, dict) and current.get("port") not in (None, ""):
+            return int(current["port"])
+
+    for line in existing_env:
+        if line.startswith("WEBHOOK_PORT=") and line.split("=", 1)[1].strip():
+            return int(line.split("=", 1)[1])
+
+    import socket
+
+    base_port = 47644
+    if home.name != ".hermes":
+        profile_name = home.name
+        if profile_name:
+            base_port += 1 + (sum(profile_name.encode("utf-8")) % 1000)
+
+    for port in range(base_port, min(base_port + 1000, 65535)):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind(("127.0.0.1", port))
+            except OSError:
+                continue
+            return port
+
+    raise RuntimeError("could not find an available local webhook port")
 
 def env_value(lines: list[str], key: str, default_factory) -> str:
     prefix = f"{key}="
@@ -276,7 +316,11 @@ else:
         shutil.copytree(dashboard_dir, plugin_dir / "dashboard", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     print(f"Installed plugin to {plugin_dir}")
 
+cfg = load_config()
 existing_env = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
+webhook_port = choose_webhook_port(home, cfg, existing_env)
+os.environ["WEBHOOK_PORT"] = str(webhook_port)
+
 secret = env_value(existing_env, "A2A_WEBHOOK_SECRET", lambda: secrets.token_hex(24))
 auth_token = env_value(existing_env, "A2A_AUTH_TOKEN", lambda: secrets.token_hex(24))
 remote_token_env = os.environ.get("A2A_REMOTE_TOKEN_ENV", "").strip()
@@ -293,10 +337,10 @@ ensure_env(env_lines, "A2A_REQUIRE_AUTH", os.environ["A2A_REQUIRE_AUTH"])
 ensure_env(env_lines, "A2A_AUTH_TOKEN", auth_token)
 ensure_env(env_lines, "A2A_WEBHOOK_SECRET", secret)
 ensure_env(env_lines, "WEBHOOK_ENABLED", "true")
+ensure_env(env_lines, "WEBHOOK_PORT", os.environ["WEBHOOK_PORT"])
 if remote_token_env:
     ensure_env(env_lines, remote_token_env, remote_token)
 
-cfg = load_config()
 plugins = cfg.setdefault("plugins", {})
 if not isinstance(plugins, dict):
     plugins = {}
@@ -326,7 +370,7 @@ webhook_extra = webhook.setdefault("extra", {})
 if not isinstance(webhook_extra, dict):
     webhook_extra = {}
     webhook["extra"] = webhook_extra
-webhook_extra.setdefault("port", 8644)
+webhook_extra["port"] = webhook_port
 webhook_extra.setdefault("secret", secret)
 routes = webhook_extra.setdefault("routes", {})
 if not isinstance(routes, dict):
@@ -358,10 +402,12 @@ platform_webhook = platforms.setdefault("webhook", {})
 if not isinstance(platform_webhook, dict):
     platform_webhook = {}
     platforms["webhook"] = platform_webhook
+platform_webhook["enabled"] = True
 platform_webhook_extra = platform_webhook.setdefault("extra", {})
 if not isinstance(platform_webhook_extra, dict):
     platform_webhook_extra = {}
     platform_webhook["extra"] = platform_webhook_extra
+platform_webhook_extra["port"] = webhook_port
 platform_routes = platform_webhook_extra.setdefault("routes", {})
 if not isinstance(platform_routes, dict):
     platform_routes = {}
@@ -388,6 +434,7 @@ security.setdefault("allow_unconfigured_urls", False)
 security.setdefault("redact_outbound", True)
 security.setdefault("max_message_chars", 50000)
 security.setdefault("max_response_chars", 100000)
+security.setdefault("max_request_bytes", 1048576)
 security.setdefault("rate_limit_per_minute", 20)
 
 remote_name = os.environ.get("A2A_REMOTE_NAME", "").strip()

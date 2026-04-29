@@ -81,7 +81,7 @@ def test_direct_url_uses_configured_agent_auth_token(monkeypatch):
         "_load_configured_agents",
         lambda: [{"name": "local", "url": "http://127.0.0.1:41731", "auth_token": "secret-token"}],
     )
-    monkeypatch.setattr(tools, "get_security_config", lambda: config.SecurityConfig(False, 50_000, 100_000, 20))
+    monkeypatch.setattr(tools, "get_security_config", lambda: config.SecurityConfig(False, 50_000, 100_000, 1_048_576, 20))
 
     def fake_http(method, url, json_body=None, headers=None):
         captured["headers"] = headers or {}
@@ -126,7 +126,7 @@ def test_handle_task_send_reports_failed_task_state(monkeypatch):
     monkeypatch.setattr(server.threading, "Thread", lambda *args, **kwargs: MagicMock(start=lambda: None))
 
     handler = object.__new__(server.A2ARequestHandler)
-    handler.server = MagicMock(max_message_chars=50_000)
+    handler.server = MagicMock(max_message_chars=50_000, max_request_bytes=1_048_576)
     handler.client_address = ("127.0.0.1", 12345)
 
     def fail_async(task_id, text, metadata):
@@ -179,6 +179,14 @@ def test_get_pending_fallback_supports_legacy_queue_without_replacement():
     legacy = LegacyQueue()
     assert server._get_pending_task(legacy, "task-1") is None
 
+
+def test_request_body_limit_is_configurable(monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", "")
+    cfg = {"a2a": {"security": {"max_request_bytes": 2_097_152}}}
+
+    security_cfg = config.get_security_config(cfg)
+
+    assert security_cfg.max_request_bytes == 2_097_152
 
 def test_inbound_auth_fail_closed_when_required_without_token():
     handler = object.__new__(server.A2ARequestHandler)

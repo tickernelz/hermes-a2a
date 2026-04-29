@@ -123,6 +123,7 @@ Common optional variables:
 | `A2A_AGENT_NAME` | `hermes-agent` | Local agent name. |
 | `A2A_AGENT_DESCRIPTION` | `Hermes A2A profile` | Local agent description. |
 | `A2A_REQUIRE_AUTH` | `true` | Require Bearer token for inbound A2A POST requests. |
+| `A2A_WEBHOOK_PORT` / `WEBHOOK_PORT` | auto | Hermes webhook listener port used for A2A wake requests. Defaults to `47644` for the main profile and auto-picks a nearby free port for named profiles; override when you need a fixed value. |
 | `A2A_HOME_PLATFORM` | empty | Platform whose toolsets should include `a2a`, for example `discord` or `telegram`. |
 | `A2A_HOME_CHAT_TYPE` | `dm` | Source chat type used for webhook session routing. |
 | `A2A_HOME_CHAT_ID` | empty | Source/delivery chat ID for webhook session routing. |
@@ -152,6 +153,7 @@ Only the selected Hermes profile directory is mutated:
 - adds `a2a` to `platform_toolsets.<A2A_HOME_PLATFORM>` when provided
 - adds `a2a` to `known_plugin_toolsets.<A2A_HOME_PLATFORM>` when provided
 - enables webhook support
+- sets the Hermes webhook listener port in both `.env` (`WEBHOOK_PORT`) and `platforms.webhook.extra.port`
 - creates or updates the `a2a_trigger` webhook route
 - writes `a2a.server`, `a2a.security`, and optional `a2a.agents` entries
 
@@ -162,6 +164,8 @@ The installer never restarts Hermes or any gateway.
 Inbound A2A requests are stored as tasks. The plugin then sends an HMAC-signed webhook to Hermes to wake the target profile. The webhook payload contains a `task_id`; the plugin resolves that ID from the profile-local task queue before injecting anything into the agent turn.
 
 Raw webhook text is not treated as user content. If a requested `task_id` is missing, the plugin falls back to the oldest pending task for compatibility.
+
+The webhook listener port must be unique for every concurrently running Hermes profile. If two profiles use the same webhook port, one gateway will fail to connect the webhook platform and can leave A2A calls waiting for a response.
 
 The webhook secret intentionally exists in two places:
 
@@ -187,6 +191,7 @@ a2a:
     redact_outbound: true
     max_message_chars: 50000
     max_response_chars: 100000
+    max_request_bytes: 1048576
     rate_limit_per_minute: 20
   agents:
     - name: other_agent
@@ -247,6 +252,10 @@ curl -X POST http://127.0.0.1:41731 \
   -d '{"jsonrpc":"2.0","id":"1","method":"tasks/get","params":{"id":"task-001"}}'
 ```
 
+## Limits and rate limiting
+
+`max_message_chars`, `max_response_chars`, `max_request_bytes`, and `rate_limit_per_minute` are safety guardrails, not performance tuning knobs. They cap pathological payloads, accidental loops, and hostile retries before they can pin the gateway or exhaust memory. Raising them can allow larger exchanges, but disabling them is a bad trade-off for always-on agents. The default request body cap is 1 MiB; the message/response caps apply after JSON parsing to the text exchanged with the agent.
+
 ## Safety model
 
 | Layer | Behavior |
@@ -259,7 +268,8 @@ curl -X POST http://127.0.0.1:41731 \
 | Queue lifecycle | Tasks move through pending, processing, completed, or failed states. |
 | Webhook wake | Signed wake request routes by `task_id`; raw webhook text is ignored as content. |
 | Persistence | Writes are profile-local, atomic, and redacted where appropriate. |
-| Rate limit | Inbound requests are rate-limited per remote address. |
+| Request/body limits | Oversized HTTP bodies and oversized message text are rejected or truncated before agent execution. |
+| Rate limit | Inbound requests are rate-limited per remote address to prevent retry storms and loops. |
 
 ## File layout
 
