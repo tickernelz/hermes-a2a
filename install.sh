@@ -136,7 +136,7 @@ _pick_python() {
 PYTHON="$(_pick_python)"
 
 export HERMES_HOME CONFIG_FILE ENV_FILE PLUGIN_DIR SOURCE_DIR DASHBOARD_DIR DRY_RUN
-export A2A_PORT="${A2A_PORT:-8081}"
+export A2A_PORT="${A2A_PORT:-41731}"
 export A2A_HOST="${A2A_HOST:-127.0.0.1}"
 export A2A_PUBLIC_URL="${A2A_PUBLIC_URL:-http://${A2A_HOST}:${A2A_PORT}}"
 export A2A_AGENT_NAME="${A2A_AGENT_NAME:-hermes-agent}"

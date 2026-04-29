@@ -35,8 +35,8 @@ curl -fsSL https://raw.githubusercontent.com/tickernelz/hermes-a2a/main/scripts/
 Review the output. If it targets the right profile, run the same command without `--dry-run`.
 
 ```bash
-A2A_PORT=8081 \
-A2A_PUBLIC_URL=http://127.0.0.1:8081 \
+A2A_PORT=41731 \
+A2A_PUBLIC_URL=http://127.0.0.1:41731 \
 A2A_AGENT_NAME=my_agent \
 A2A_AGENT_DESCRIPTION='My Hermes profile' \
 A2A_HOME_PLATFORM=discord \
@@ -45,7 +45,7 @@ A2A_HOME_CHAT_ID=123456789012345678 \
 A2A_HOME_USER_ID=123456789012345678 \
 A2A_HOME_USER_NAME='Hermes User' \
 A2A_REMOTE_NAME=other_agent \
-A2A_REMOTE_URL=http://127.0.0.1:8082 \
+A2A_REMOTE_URL=http://127.0.0.1:41732 \
 A2A_REMOTE_DESCRIPTION='Other Hermes profile' \
 A2A_REMOTE_TOKEN_ENV=A2A_AGENT_OTHER_TOKEN \
   curl -fsSL https://raw.githubusercontent.com/tickernelz/hermes-a2a/main/scripts/a2a.sh \
@@ -118,7 +118,7 @@ Common optional variables:
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `A2A_HOST` | `127.0.0.1` | Host for the profile-local A2A HTTP server. |
-| `A2A_PORT` | `8081` | Port for the A2A HTTP server. Use a unique port per profile. |
+| `A2A_PORT` | `41731` | Port for the A2A HTTP server. Use a unique port per profile. |
 | `A2A_PUBLIC_URL` | `http://$A2A_HOST:$A2A_PORT` | URL advertised in the agent card. |
 | `A2A_AGENT_NAME` | `hermes-agent` | Local agent name. |
 | `A2A_AGENT_DESCRIPTION` | `Hermes A2A profile` | Local agent description. |
@@ -179,8 +179,8 @@ a2a:
   enabled: true
   server:
     host: 127.0.0.1
-    port: 8081
-    public_url: http://127.0.0.1:8081
+    port: 41731
+    public_url: http://127.0.0.1:41731
     require_auth: true
   security:
     allow_unconfigured_urls: false
@@ -190,7 +190,7 @@ a2a:
     rate_limit_per_minute: 20
   agents:
     - name: other_agent
-      url: http://127.0.0.1:8082
+      url: http://127.0.0.1:41732
       description: Another Hermes profile
       auth_token_env: A2A_AGENT_OTHER_TOKEN
       enabled: true
@@ -209,7 +209,7 @@ A2A_WEBHOOK_SECRET=<shared-webhook-secret>
 After the target Hermes gateway is restarted, the agent becomes discoverable at:
 
 ```text
-http://127.0.0.1:8081/.well-known/agent.json
+http://127.0.0.1:41731/.well-known/agent.json
 ```
 
 From Hermes, use:
@@ -221,7 +221,7 @@ From Hermes, use:
 A raw A2A JSON-RPC call looks like this:
 
 ```bash
-curl -X POST http://127.0.0.1:8081 \
+curl -X POST http://127.0.0.1:41731 \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer <token>' \
   -d '{
@@ -241,7 +241,7 @@ curl -X POST http://127.0.0.1:8081 \
 If a remote agent returns `working`, poll with `tasks/get`:
 
 ```bash
-curl -X POST http://127.0.0.1:8081 \
+curl -X POST http://127.0.0.1:41731 \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer <token>' \
   -d '{"jsonrpc":"2.0","id":"1","method":"tasks/get","params":{"id":"task-001"}}'

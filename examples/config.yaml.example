@@ -18,8 +18,8 @@ a2a:
   enabled: true
   server:
     host: 127.0.0.1
-    port: 8081
-    public_url: http://127.0.0.1:8081
+    port: 41731
+    public_url: http://127.0.0.1:41731
     require_auth: true
   security:
     allow_unconfigured_urls: false
@@ -29,7 +29,7 @@ a2a:
     rate_limit_per_minute: 20
   agents:
     - name: reviewer_agent
-      url: http://127.0.0.1:8082
+      url: http://127.0.0.1:41732
       description: Local reviewer Hermes profile
       auth_token_env: A2A_AGENT_REVIEWER_TOKEN
       enabled: true
@@ -78,8 +78,8 @@ platforms:
 # Matching .env values for this profile:
 # A2A_ENABLED=true
 # A2A_HOST=127.0.0.1
-# A2A_PORT=8081
-# A2A_PUBLIC_URL=http://127.0.0.1:8081
+# A2A_PORT=41731
+# A2A_PUBLIC_URL=http://127.0.0.1:41731
 # A2A_REQUIRE_AUTH=true
 # A2A_AUTH_TOKEN=<secret for inbound calls to this profile>
 # A2A_WEBHOOK_SECRET=<secret used by webhook route>

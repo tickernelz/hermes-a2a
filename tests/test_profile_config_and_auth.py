@@ -53,7 +53,7 @@ def test_load_agents_resolves_auth_token_env_and_skips_disabled(monkeypatch, tmp
 a2a:
   agents:
     - name: reviewer_agent
-      url: http://127.0.0.1:8082/
+      url: http://127.0.0.1:41732/
       description: Reviewer
       auth_token_env: REVIEWER_A2A_TOKEN
       enabled: true
@@ -69,7 +69,7 @@ a2a:
 
     assert len(agents) == 1
     assert agents[0]["name"] == "reviewer_agent"
-    assert agents[0]["url"] == "http://127.0.0.1:8082"
+    assert agents[0]["url"] == "http://127.0.0.1:41732"
     assert agents[0]["auth_token"] == "secret-token"
     assert agents[0]["auth_token_env"] == "REVIEWER_A2A_TOKEN"
 
@@ -79,7 +79,7 @@ def test_direct_url_uses_configured_agent_auth_token(monkeypatch):
     monkeypatch.setattr(
         tools,
         "_load_configured_agents",
-        lambda: [{"name": "local", "url": "http://127.0.0.1:8081", "auth_token": "secret-token"}],
+        lambda: [{"name": "local", "url": "http://127.0.0.1:41731", "auth_token": "secret-token"}],
     )
     monkeypatch.setattr(tools, "get_security_config", lambda: config.SecurityConfig(False, 50_000, 100_000, 20))
 
@@ -89,7 +89,7 @@ def test_direct_url_uses_configured_agent_auth_token(monkeypatch):
 
     monkeypatch.setattr(tools, "_http_request", fake_http)
 
-    result = json.loads(tools.handle_discover({"url": "http://127.0.0.1:8081"}))
+    result = json.loads(tools.handle_discover({"url": "http://127.0.0.1:41731"}))
 
     assert result["agent_name"] == "local"
     assert captured["headers"]["Authorization"] == "Bearer secret-token"

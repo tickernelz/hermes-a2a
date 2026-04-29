@@ -83,7 +83,7 @@ def get_server_config(config: dict[str, Any] | None = None) -> ServerConfig:
         server = {}
 
     host = os.getenv("A2A_HOST") or str(server.get("host") or "127.0.0.1")
-    port = _int(os.getenv("A2A_PORT") or server.get("port"), 8081)
+    port = _int(os.getenv("A2A_PORT") or server.get("port"), 41731)
     public_url = (os.getenv("A2A_PUBLIC_URL") or str(server.get("public_url") or "")).rstrip("/")
     require_auth = _truthy(os.getenv("A2A_REQUIRE_AUTH")) or _truthy(server.get("require_auth"))
     return ServerConfig(host=host, port=port, public_url=public_url, require_auth=require_auth)

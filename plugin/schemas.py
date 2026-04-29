@@ -13,7 +13,7 @@ A2A_DISCOVER = {
         "properties": {
             "url": {
                 "type": "string",
-                "description": "Base URL of the remote agent (e.g. http://agent:8081)",
+                "description": "Base URL of the remote agent (e.g. http://agent:41731)",
             },
             "name": {
                 "type": "string",

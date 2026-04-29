@@ -24,7 +24,7 @@ def test_direct_url_requires_configured_target(monkeypatch):
     monkeypatch.setattr(tools, "_load_configured_agents", lambda: [])
     monkeypatch.delenv("A2A_ALLOW_UNCONFIGURED_URLS", raising=False)
 
-    result = json.loads(tools.handle_discover({"url": "http://127.0.0.1:8081"}))
+    result = json.loads(tools.handle_discover({"url": "http://127.0.0.1:41731"}))
 
     assert "error" in result
     assert "not configured" in result["error"]
@@ -34,7 +34,7 @@ def test_configured_direct_url_is_allowed(monkeypatch):
     monkeypatch.setattr(
         tools,
         "_load_configured_agents",
-        lambda: [{"name": "local", "url": "http://127.0.0.1:8081", "auth_token": "tok"}],
+        lambda: [{"name": "local", "url": "http://127.0.0.1:41731", "auth_token": "tok"}],
     )
     monkeypatch.setattr(
         tools,
@@ -42,7 +42,7 @@ def test_configured_direct_url_is_allowed(monkeypatch):
         lambda *args, **kwargs: {"name": "local", "skills": [], "capabilities": {}},
     )
 
-    result = json.loads(tools.handle_discover({"url": "http://127.0.0.1:8081"}))
+    result = json.loads(tools.handle_discover({"url": "http://127.0.0.1:41731"}))
 
     assert result["agent_name"] == "local"
 

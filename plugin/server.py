@@ -30,7 +30,7 @@ from .security import RateLimiter, audit, filter_outbound, sanitize_inbound
 logger = logging.getLogger(__name__)
 
 DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 8081
+DEFAULT_PORT = 41731
 _TASK_CACHE_MAX = 1000
 _MAX_PENDING = 10
 _RESPONSE_TIMEOUT = 120  # seconds to wait for agent response
