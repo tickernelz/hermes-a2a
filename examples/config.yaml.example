@@ -28,12 +28,12 @@ a2a:
     max_response_chars: 100000
     rate_limit_per_minute: 20
   agents:
-    - name: yanto_coder
+    - name: reviewer_agent
       url: http://127.0.0.1:8082
-      description: Yanto Coder Hermes profile
-      auth_token_env: A2A_AGENT_YANTO_TOKEN
+      description: Local reviewer Hermes profile
+      auth_token_env: A2A_AGENT_REVIEWER_TOKEN
       enabled: true
-      tags: [local, coder]
+      tags: [local, reviewer]
       trust_level: trusted
 
 webhook:
@@ -45,15 +45,14 @@ webhook:
         secret: <same random value as A2A_WEBHOOK_SECRET in .env>
         deliver: discord
         deliver_extra:
-          chat_id: '1499028849261023322'
+          chat_id: '<discord-chat-id>'
         prompt: '[A2A trigger]'
         source:
           platform: discord
           chat_type: group
-          chat_id: '1499028849261023322'
-          user_id: '287600440659410944'
-          user_name: Zhafron
-
+          chat_id: '<discord-chat-id>'
+          user_id: '<discord-user-id>'
+          user_name: '<display-name>'
 
 # Note: Hermes webhook validation reads the route secret from config.yaml,
 # while the A2A plugin uses A2A_WEBHOOK_SECRET from .env when signing the
@@ -67,14 +66,14 @@ platforms:
           secret: <same random value as A2A_WEBHOOK_SECRET in .env>
           deliver: discord
           deliver_extra:
-            chat_id: '1499028849261023322'
+            chat_id: '<discord-chat-id>'
           prompt: '[A2A trigger]'
           source:
             platform: discord
             chat_type: group
-            chat_id: '1499028849261023322'
-            user_id: '287600440659410944'
-            user_name: Zhafron
+            chat_id: '<discord-chat-id>'
+            user_id: '<discord-user-id>'
+            user_name: '<display-name>'
 
 # Matching .env values for this profile:
 # A2A_ENABLED=true
@@ -82,7 +81,7 @@ platforms:
 # A2A_PORT=8081
 # A2A_PUBLIC_URL=http://127.0.0.1:8081
 # A2A_REQUIRE_AUTH=true
-# A2A_AUTH_TOKEN=<random secret for inbound calls to this profile>
-# A2A_WEBHOOK_SECRET=<random secret used by webhook route>
-# A2A_AGENT_YANTO_TOKEN=<token expected by yanto_coder>
+# A2A_AUTH_TOKEN=<secret for inbound calls to this profile>
+# A2A_WEBHOOK_SECRET=<secret used by webhook route>
+# A2A_AGENT_REVIEWER_TOKEN=<secret expected by reviewer_agent>
 # WEBHOOK_ENABLED=true

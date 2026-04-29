@@ -1,6 +1,7 @@
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import yaml
@@ -10,23 +11,27 @@ INSTALL = ROOT / "install.sh"
 UNINSTALL = ROOT / "uninstall.sh"
 
 
-def run_install(home: Path, *args: str, **env_overrides):
+def run_install(home: Path | None, *args: str, **env_overrides):
     env = os.environ.copy()
+    if home is None:
+        env.pop("HERMES_HOME", None)
+    else:
+        env["HERMES_HOME"] = str(home)
     env.update({
-        "HERMES_HOME": str(home),
+        "HERMES_PYTHON": sys.executable,
         "A2A_PORT": "18081",
         "A2A_PUBLIC_URL": "http://127.0.0.1:18081",
-        "A2A_AGENT_NAME": "jono",
-        "A2A_AGENT_DESCRIPTION": "Jono test profile",
-        "A2A_REMOTE_NAME": "yanto_coder",
+        "A2A_AGENT_NAME": "primary_agent",
+        "A2A_AGENT_DESCRIPTION": "Primary test profile",
+        "A2A_REMOTE_NAME": "reviewer_agent",
         "A2A_REMOTE_URL": "http://127.0.0.1:18082",
-        "A2A_REMOTE_DESCRIPTION": "Yanto Coder test profile",
-        "A2A_REMOTE_TOKEN_ENV": "A2A_AGENT_YANTO_TOKEN",
+        "A2A_REMOTE_DESCRIPTION": "Reviewer test profile",
+        "A2A_REMOTE_TOKEN_ENV": "A2A_AGENT_REVIEWER_TOKEN",
         "A2A_HOME_PLATFORM": "discord",
         "A2A_HOME_CHAT_TYPE": "group",
-        "A2A_HOME_CHAT_ID": "1499028849261023322",
-        "A2A_HOME_USER_ID": "287600440659410944",
-        "A2A_HOME_USER_NAME": "Zhafron",
+        "A2A_HOME_CHAT_ID": "123456789012345678",
+        "A2A_HOME_USER_ID": "234567890123456789",
+        "A2A_HOME_USER_NAME": "Example User",
     })
     env.update(env_overrides)
     return subprocess.run(
@@ -39,9 +44,13 @@ def run_install(home: Path, *args: str, **env_overrides):
     )
 
 
-def run_uninstall(home: Path, *args: str):
+def run_uninstall(home: Path | None, *args: str, **env_overrides):
     env = os.environ.copy()
-    env["HERMES_HOME"] = str(home)
+    if home is None:
+        env.pop("HERMES_HOME", None)
+    else:
+        env["HERMES_HOME"] = str(home)
+    env.update(env_overrides)
     return subprocess.run(
         ["bash", str(UNINSTALL), *args],
         cwd=ROOT,
@@ -56,38 +65,45 @@ def read_config(home: Path):
     return yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8")) or {}
 
 
-def test_install_requires_explicit_hermes_home(tmp_path):
-    env = os.environ.copy()
-    env.pop("HERMES_HOME", None)
+def test_install_autodetects_single_default_profile_without_hermes_home(tmp_path):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    config_path = home / "config.yaml"
+    config_path.write_text("plugins: {}\n", encoding="utf-8")
 
-    result = subprocess.run(
-        ["bash", str(INSTALL), "--dry-run"],
-        cwd=ROOT,
-        env=env,
-        text=True,
-        capture_output=True,
-        timeout=30,
-    )
+    result = run_install(None, "--dry-run", HOME=str(tmp_path))
 
-    assert result.returncode != 0
-    assert "HERMES_HOME" in result.stderr
+    assert result.returncode == 0, result.stderr
+    assert "DRY RUN" in result.stdout
+    assert not (home / "plugins" / "a2a").exists()
 
 
-def test_uninstall_requires_explicit_hermes_home(tmp_path):
-    env = os.environ.copy()
-    env.pop("HERMES_HOME", None)
+def test_uninstall_autodetects_single_default_profile_without_hermes_home(tmp_path):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    (home / "config.yaml").write_text("plugins: {}\n", encoding="utf-8")
+    plugin = home / "plugins" / "a2a"
+    plugin.mkdir(parents=True)
 
-    result = subprocess.run(
-        ["bash", str(UNINSTALL), "--dry-run"],
-        cwd=ROOT,
-        env=env,
-        text=True,
-        capture_output=True,
-        timeout=30,
-    )
+    result = run_uninstall(None, "--dry-run", HOME=str(tmp_path))
 
-    assert result.returncode != 0
-    assert "HERMES_HOME" in result.stderr
+    assert result.returncode == 0, result.stderr
+    assert str(plugin) in result.stdout
+    assert plugin.exists()
+
+
+def test_install_profile_argument_targets_named_profile(tmp_path):
+    home = tmp_path / ".hermes"
+    named = home / "profiles" / "coder"
+    named.mkdir(parents=True)
+    (home).mkdir(exist_ok=True)
+    (named / "config.yaml").write_text("plugins: {}\n", encoding="utf-8")
+
+    result = run_install(None, "--profile", "coder", "--dry-run", HOME=str(tmp_path))
+
+    assert result.returncode == 0, result.stderr
+    assert "DRY RUN" in result.stdout
+    assert str(named) in result.stdout
 
 
 def test_install_fails_if_hermes_home_missing_config(tmp_path):
@@ -119,12 +135,12 @@ def test_install_dry_run_does_not_mutate_profile(tmp_path):
 
 
 def test_install_is_profile_safe_idempotent_and_enables_a2a(tmp_path):
-    home = tmp_path / "jono"
-    sibling = tmp_path / "akbar_hmx"
+    home = tmp_path / "primary"
+    sibling = tmp_path / "sibling_profile"
     home.mkdir()
     sibling.mkdir()
-    (sibling / "config.yaml").write_text("akbar: untouched\n", encoding="utf-8")
-    (sibling / ".env").write_text("AKBAR=untouched\n", encoding="utf-8")
+    (sibling / "config.yaml").write_text("sibling: untouched\n", encoding="utf-8")
+    (sibling / ".env").write_text("SIBLING=untouched\n", encoding="utf-8")
     (home / "config.yaml").write_text(
         """
 plugins:
@@ -165,22 +181,22 @@ webhook:
     assert route["secret"] == cfg["platforms"]["webhook"]["extra"]["routes"]["a2a_trigger"]["secret"]
     assert route["prompt"] == "[A2A trigger]"
     assert route["deliver"] == "discord"
-    assert route["deliver_extra"] == {"chat_id": "1499028849261023322"}
+    assert route["deliver_extra"] == {"chat_id": "123456789012345678"}
     assert route["source"] == {
         "platform": "discord",
         "chat_type": "group",
-        "chat_id": "1499028849261023322",
-        "user_id": "287600440659410944",
-        "user_name": "Zhafron",
+        "chat_id": "123456789012345678",
+        "user_id": "234567890123456789",
+        "user_name": "Example User",
     }
     assert cfg["a2a"]["enabled"] is True
     assert cfg["a2a"]["server"]["port"] == 18081
     assert cfg["a2a"]["server"]["require_auth"] is True
     assert cfg["a2a"]["agents"] == [{
-        "name": "yanto_coder",
+        "name": "reviewer_agent",
         "url": "http://127.0.0.1:18082",
-        "description": "Yanto Coder test profile",
-        "auth_token_env": "A2A_AGENT_YANTO_TOKEN",
+        "description": "Reviewer test profile",
+        "auth_token_env": "A2A_AGENT_REVIEWER_TOKEN",
         "enabled": True,
         "tags": ["local"],
         "trust_level": "trusted",
@@ -193,18 +209,22 @@ webhook:
         "A2A_REQUIRE_AUTH",
         "A2A_WEBHOOK_SECRET",
         "A2A_PUBLIC_URL",
-        "A2A_AGENT_YANTO_TOKEN",
+        "A2A_AGENT_REVIEWER_TOKEN",
         "WEBHOOK_ENABLED",
     ]:
         assert env_text.count(f"{key}=") == 1
     assert "EXISTING=1" in env_text
-    assert (sibling / "config.yaml").read_text(encoding="utf-8") == "akbar: untouched\n"
-    assert (sibling / ".env").read_text(encoding="utf-8") == "AKBAR=untouched\n"
+    assert (sibling / "config.yaml").read_text(encoding="utf-8") == "sibling: untouched\n"
+    assert (sibling / ".env").read_text(encoding="utf-8") == "SIBLING=untouched\n"
 
 
 def test_uninstall_is_profile_safe_and_supports_dry_run(tmp_path):
     home = tmp_path / "profile"
     other = tmp_path / "other"
+    home.mkdir()
+    other.mkdir()
+    (home / "config.yaml").write_text("plugins: {}\n", encoding="utf-8")
+    (other / "config.yaml").write_text("plugins: {}\n", encoding="utf-8")
     plugin = home / "plugins" / "a2a"
     other_plugin = other / "plugins" / "a2a"
     plugin.mkdir(parents=True)
@@ -221,3 +241,16 @@ def test_uninstall_is_profile_safe_and_supports_dry_run(tmp_path):
     assert result.returncode == 0, result.stderr
     assert not plugin.exists()
     assert other_plugin.exists()
+
+
+def test_uninstall_refuses_profile_without_config(tmp_path):
+    home = tmp_path / "profile"
+    plugin = home / "plugins" / "a2a"
+    plugin.mkdir(parents=True)
+    (plugin / "plugin.yaml").write_text("name: a2a\n", encoding="utf-8")
+
+    result = run_uninstall(home, "--dry-run")
+
+    assert result.returncode != 0
+    assert "config.yaml" in result.stderr
+    assert plugin.exists()

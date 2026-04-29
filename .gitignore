@@ -4,6 +4,7 @@ __pycache__/
 .env
 *.egg-info/
 build/
+.pytest_cache/
 
 # Ignore top-level dist/ but keep dashboard/dist/ (pre-built UI)
 /dist/

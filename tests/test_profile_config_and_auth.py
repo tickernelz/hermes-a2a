@@ -35,7 +35,7 @@ class LegacyQueue:
 
 
 def test_profile_paths_follow_hermes_home(monkeypatch, tmp_path):
-    profile_home = tmp_path / "profiles" / "yanto"
+    profile_home = tmp_path / "profiles" / "reviewer"
     monkeypatch.setenv("HERMES_HOME", str(profile_home))
     monkeypatch.setattr(paths, "get_hermes_home", lambda: None, raising=False)
 
@@ -47,15 +47,15 @@ def test_profile_paths_follow_hermes_home(monkeypatch, tmp_path):
 
 def test_load_agents_resolves_auth_token_env_and_skips_disabled(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    monkeypatch.setenv("YANTO_A2A_TOKEN", "secret-token")
+    monkeypatch.setenv("REVIEWER_A2A_TOKEN", "secret-token")
     (tmp_path / "config.yaml").write_text(
         """
 a2a:
   agents:
-    - name: yanto_coder
+    - name: reviewer_agent
       url: http://127.0.0.1:8082/
-      description: Yanto
-      auth_token_env: YANTO_A2A_TOKEN
+      description: Reviewer
+      auth_token_env: REVIEWER_A2A_TOKEN
       enabled: true
       trust_level: trusted
     - name: disabled
@@ -68,10 +68,10 @@ a2a:
     agents = config.load_agents()
 
     assert len(agents) == 1
-    assert agents[0]["name"] == "yanto_coder"
+    assert agents[0]["name"] == "reviewer_agent"
     assert agents[0]["url"] == "http://127.0.0.1:8082"
     assert agents[0]["auth_token"] == "secret-token"
-    assert agents[0]["auth_token_env"] == "YANTO_A2A_TOKEN"
+    assert agents[0]["auth_token_env"] == "REVIEWER_A2A_TOKEN"
 
 
 def test_direct_url_uses_configured_agent_auth_token(monkeypatch):
@@ -218,14 +218,14 @@ def test_persistence_writes_atomically_under_active_profile(monkeypatch, tmp_pat
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
     path = persistence.save_exchange(
-        agent_name="Yanto Coder",
+        agent_name="Reviewer Agent",
         task_id="task-1",
         inbound_text="token=secretvalue",
         outbound_text="done",
         metadata={"auth_token": "secretvalue", "note": "ok"},
     )
 
-    assert path == tmp_path / "a2a_conversations" / "yanto_coder" / f"{path.stem}.md"
+    assert path == tmp_path / "a2a_conversations" / "reviewer_agent" / f"{path.stem}.md"
     content = path.read_text(encoding="utf-8")
     assert "secretvalue" not in content
     assert "[REDACTED]" in content
@@ -233,7 +233,7 @@ def test_persistence_writes_atomically_under_active_profile(monkeypatch, tmp_pat
 
 
 def test_server_agent_card_uses_public_url(monkeypatch):
-    monkeypatch.setenv("A2A_PUBLIC_URL", "https://jono.example/a2a/")
+    monkeypatch.setenv("A2A_PUBLIC_URL", "https://primary.example/a2a/")
     monkeypatch.setenv("A2A_REQUIRE_AUTH", "true")
     monkeypatch.delenv("A2A_AUTH_TOKEN", raising=False)
 
@@ -243,5 +243,5 @@ def test_server_agent_card_uses_public_url(monkeypatch):
     finally:
         a2a_server.server_close()
 
-    assert card["url"] == "https://jono.example/a2a"
+    assert card["url"] == "https://primary.example/a2a"
     assert a2a_server.require_auth is True
