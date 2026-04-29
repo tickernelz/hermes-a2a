@@ -56,6 +56,18 @@ A2A_CALL = {
                 "type": "string",
                 "description": "Optional native A2A context ID for correlating related messages",
             },
+            "background": {
+                "type": "boolean",
+                "description": "Submit the task and return immediately without polling; final response can be retrieved with a2a_get or notification",
+            },
+            "notify": {
+                "type": "boolean",
+                "description": "When background=true, request remote final notification if supported",
+            },
+            "notify_url": {
+                "type": "string",
+                "description": "Optional callback URL for background notification; normally omit unless explicitly configured",
+            },
             "parts": {
                 "type": "array",
                 "description": "Optional extra A2A content parts, such as data or safe file/image/audio references",
@@ -85,5 +97,34 @@ A2A_LIST = {
     "parameters": {
         "type": "object",
         "properties": {},
+    },
+}
+
+
+A2A_GET = {
+    "name": "a2a_get",
+    "description": "Fetch the current state/result of a remote A2A task without submitting a new message.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "url": {"type": "string", "description": "Base URL of the remote agent"},
+            "name": {"type": "string", "description": "Name of a configured agent (alternative to url)"},
+            "task_id": {"type": "string", "description": "Remote task ID to fetch"},
+        },
+        "required": ["task_id"],
+    },
+}
+
+A2A_CANCEL = {
+    "name": "a2a_cancel",
+    "description": "Cancel a remote A2A task when the remote agent supports cancellation.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "url": {"type": "string", "description": "Base URL of the remote agent"},
+            "name": {"type": "string", "description": "Name of a configured agent (alternative to url)"},
+            "task_id": {"type": "string", "description": "Remote task ID to cancel"},
+        },
+        "required": ["task_id"],
     },
 }

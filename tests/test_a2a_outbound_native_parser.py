@@ -272,3 +272,92 @@ def test_build_message_parts_allows_nested_http_reference_url(monkeypatch):
     parts = tools._build_message_parts("hello", [{"file": {"url": "https://example.com/a.png", "name": "a.png"}}], native=True)
 
     assert parts[1]["file"]["url"] == "https://example.com/a.png"
+
+
+def test_handle_call_background_does_not_poll(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    calls = []
+
+    def fake_http(method, url, json_body=None, headers=None):
+        if method == "GET":
+            return {"preferredTransport": "JSONRPC", "protocolVersion": "0.3.0"}
+        calls.append(json_body["method"])
+        if len(calls) > 1:
+            raise AssertionError("background call must not poll")
+        return {"result": {"kind": "task", "id": "remote-bg", "contextId": "ctx", "status": {"state": "working"}}}
+
+    monkeypatch.setattr(tools, "_resolve_target", lambda name, url: ("http://agent.local", ""))
+    monkeypatch.setattr(tools, "_consume_rate_limit", lambda: True)
+    monkeypatch.setattr(tools, "_http_request", fake_http)
+    monkeypatch.setattr(tools, "get_security_config", lambda: type("Cfg", (), {"max_parts": 20, "max_raw_part_bytes": 262_144, "max_request_bytes": 1_048_576})())
+    monkeypatch.setattr("plugin.persistence.save_exchange", lambda **kwargs: None)
+
+    result = json.loads(tools.handle_call({"url": "http://agent.local", "message": "slow", "task_id": "local-bg", "background": True}))
+
+    assert calls == ["SendMessage"]
+    assert result["background"] is True
+    assert result["task_id"] == "remote-bg"
+    assert result["state"] in {"submitted", "working"}
+
+
+def test_handle_call_background_completed_immediately_returns_completed(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    def fake_http(method, url, json_body=None, headers=None):
+        if method == "GET":
+            return {"preferredTransport": "JSONRPC", "protocolVersion": "0.3.0"}
+        return {"result": {"kind": "task", "id": "remote-bg", "contextId": "ctx", "status": {"state": "completed", "message": {"parts": [{"kind": "text", "text": "done"}]}}}}
+
+    monkeypatch.setattr(tools, "_resolve_target", lambda name, url: ("http://agent.local", ""))
+    monkeypatch.setattr(tools, "_consume_rate_limit", lambda: True)
+    monkeypatch.setattr(tools, "_http_request", fake_http)
+    monkeypatch.setattr(tools, "get_security_config", lambda: type("Cfg", (), {"max_parts": 20, "max_raw_part_bytes": 262_144, "max_request_bytes": 1_048_576})())
+    monkeypatch.setattr("plugin.persistence.save_exchange", lambda **kwargs: None)
+    monkeypatch.setattr("plugin.persistence.update_exchange", lambda **kwargs: None)
+
+    result = json.loads(tools.handle_call({"url": "http://agent.local", "message": "slow", "task_id": "local-bg", "background": True}))
+
+    assert result["background"] is True
+    assert result["state"] == "completed"
+    assert result["response"] == "done"
+
+
+def test_handle_get_polls_remote_task_once(monkeypatch):
+    captured = {}
+
+    def fake_http(method, url, json_body=None, headers=None):
+        captured["payload"] = json_body
+        return {"result": {"kind": "task", "id": "remote-1", "contextId": "ctx", "status": {"state": "completed", "message": {"parts": [{"kind": "text", "text": "done"}]}}}}
+
+    monkeypatch.setattr(tools, "_resolve_target", lambda name, url: ("http://agent.local", "secret"))
+    monkeypatch.setattr(tools, "_http_request", fake_http)
+    monkeypatch.setattr(tools, "_discover_card", lambda url, headers: {"preferredTransport": "JSONRPC", "protocolVersion": "0.3.0"})
+
+    result = json.loads(tools.handle_get({"name": "reviewer", "task_id": "remote-1"}))
+
+    assert captured["payload"]["method"] == "GetTask"
+    assert captured["payload"]["params"]["id"] == "remote-1"
+    assert result["state"] == "completed"
+    assert result["response"] == "done"
+
+
+def test_background_persists_before_http_post(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    def fake_http(method, url, json_body=None, headers=None):
+        if method == "GET":
+            return {"preferredTransport": "JSONRPC", "protocolVersion": "0.3.0"}
+        raise TimeoutError("boom")
+
+    monkeypatch.setattr(tools, "_resolve_target", lambda name, url: ("http://agent.local", ""))
+    monkeypatch.setattr(tools, "_consume_rate_limit", lambda: True)
+    monkeypatch.setattr(tools, "_http_request", fake_http)
+    monkeypatch.setattr(tools, "get_security_config", lambda: type("Cfg", (), {"max_parts": 20, "max_raw_part_bytes": 262_144, "max_request_bytes": 1_048_576})())
+    monkeypatch.setattr("plugin.persistence.save_exchange", lambda **kwargs: None)
+
+    result = json.loads(tools.handle_call({"url": "http://agent.local", "message": "slow", "task_id": "local-bg", "background": True}))
+
+    assert "error" in result
+    record = tools.task_store.get_task("local-bg")
+    assert record["state"] == "failed"
+    assert record["url"] == "http://agent.local"

@@ -234,6 +234,11 @@ From Hermes, use:
 - `a2a_list` to list configured remote agents
 - `a2a_discover` to fetch a configured agent card
 - `a2a_call` to send a message to a configured agent
+- `a2a_call(..., background=true)` to submit long-running work without blocking the caller
+- `a2a_get` to poll a background task later
+- `a2a_cancel` to request cancellation when the remote supports it
+
+Background calls persist a profile-local task record in `a2a_tasks.json` before the HTTP POST. If the remote returns `working`/`submitted`, the tool returns immediately instead of polling; final state can be retrieved with `a2a_get` or updated through authenticated `tasks/notify` / `TaskNotification`. Terminal task states are immutable, so late duplicate notifications cannot overwrite a completed, failed, or canceled result.
 
 A raw A2A JSON-RPC call looks like this:
 
@@ -277,9 +282,10 @@ curl -X POST http://127.0.0.1:41731 \
 | Outbound auth | Remote tokens are resolved through `auth_token_env`. |
 | Registry | Configured agent names are preferred; direct URLs are blocked by default. |
 | Input validation | JSON-RPC and A2A task payloads are validated before queueing. |
-| Queue lifecycle | Tasks move through pending, processing, completed, or failed states. |
+| Queue lifecycle | Tasks move through submitted, working, completed, failed, canceled, rejected, or expired states. Terminal states are immutable. |
+| Background tasks | Long-running outbound work persists profile-local task records and can be polled or completed through authenticated notifications. |
 | Webhook wake | Signed wake request routes by `task_id`; raw webhook text is ignored as content. |
-| Persistence | Writes are profile-local, atomic, and redacted where appropriate. |
+| Persistence | Writes are profile-local, atomic, capped, and redacted where appropriate. |
 | Request/body limits | Oversized HTTP bodies and oversized message text are rejected or truncated before agent execution. |
 | Rate limit | Inbound requests are rate-limited per remote address to prevent retry storms and loops. |
 
@@ -296,6 +302,7 @@ Installed under the selected profile's `plugins/a2a/`:
 | `paths.py` | Profile-safe path resolution. |
 | `security.py` | Filtering, redaction, rate limiting, audit helpers. |
 | `persistence.py` | Profile-local conversation persistence. |
+| `task_store.py` | Profile-local background task state store. |
 | `schemas.py` | Tool schemas. |
 | `plugin.yaml` | Plugin manifest. |
 | `dashboard/` | Dashboard assets and plugin API support. |

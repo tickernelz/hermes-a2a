@@ -8,8 +8,8 @@ import logging
 import os
 import threading
 
-from .schemas import A2A_DISCOVER, A2A_CALL, A2A_LIST
-from .tools import handle_discover, handle_call, handle_list
+from .schemas import A2A_DISCOVER, A2A_CALL, A2A_LIST, A2A_GET, A2A_CANCEL
+from .tools import handle_discover, handle_call, handle_get, handle_cancel, handle_list
 from . import server as a2a_server
 from .config import get_server_config, load_agents
 from .paths import conversation_dir
@@ -68,6 +68,8 @@ def register(ctx):
 
     ctx.register_tool("a2a_discover", "a2a", A2A_DISCOVER, handle_discover)
     ctx.register_tool("a2a_call", "a2a", A2A_CALL, handle_call)
+    ctx.register_tool("a2a_get", "a2a", A2A_GET, handle_get)
+    ctx.register_tool("a2a_cancel", "a2a", A2A_CANCEL, handle_cancel)
     ctx.register_tool("a2a_list", "a2a", A2A_LIST, handle_list)
 
     ctx.register_hook("pre_llm_call", _on_pre_llm_call)

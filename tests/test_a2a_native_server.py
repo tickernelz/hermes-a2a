@@ -280,3 +280,83 @@ def test_gettask_cached_response_is_truncated_by_max_response_chars(monkeypatch)
     text = data["result"]["status"]["message"]["parts"][0]["text"]
     assert text.startswith("abcd")
     assert "truncated by A2A max_response_chars" in text
+
+
+def test_background_send_returns_submitted_without_waiting(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    queue = server.TaskQueue()
+    monkeypatch.setattr(server, "task_queue", queue)
+    monkeypatch.setattr(server, "_trigger_webhook", lambda task_id="": None)
+    waited = {"called": False}
+    original_enqueue = queue.enqueue
+
+    def enqueue(task_id, text, metadata):
+        task = original_enqueue(task_id, text, metadata)
+        original_wait = task.ready.wait
+        def wait(*args, **kwargs):
+            waited["called"] = True
+            return original_wait(*args, **kwargs)
+        task.ready.wait = wait
+        return task
+
+    monkeypatch.setattr(queue, "enqueue", enqueue)
+    handler, _sent = make_handler(
+        monkeypatch,
+        "SendMessage",
+        {"message": {"taskId": "background-1", "parts": [{"text": "slow"}], "metadata": {"background": True}}},
+    )
+
+    handler.do_POST()
+    data = read_response(handler)
+
+    assert waited["called"] is False
+    assert data["result"]["id"] == "background-1"
+    assert data["result"]["status"]["state"] == "submitted"
+    assert queue.get_status("background-1")["state"] == "submitted"
+
+
+def test_legacy_background_send_returns_working_without_waiting(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    queue = server.TaskQueue()
+    monkeypatch.setattr(server, "task_queue", queue)
+    monkeypatch.setattr(server, "_trigger_webhook", lambda task_id="": None)
+    handler, _sent = make_handler(
+        monkeypatch,
+        "tasks/send",
+        {"id": "background-legacy", "background": True, "message": {"parts": [{"type": "text", "text": "slow"}]}},
+    )
+
+    handler.do_POST()
+    data = read_response(handler)
+
+    assert data["result"]["id"] == "background-legacy"
+    assert data["result"]["status"]["state"] == "working"
+    assert queue.get_status("background-legacy")["state"] == "submitted"
+
+
+def test_duplicate_background_task_returns_existing_status(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    queue = server.TaskQueue()
+    monkeypatch.setattr(server, "task_queue", queue)
+    monkeypatch.setattr(server, "_trigger_webhook", lambda task_id="": None)
+    queue.enqueue("dup-task", "old", {"context_id": "ctx"})
+
+    handler, _sent = make_handler(monkeypatch, "SendMessage", {"message": {"taskId": "dup-task", "parts": [{"text": "again"}], "metadata": {"background": True}}})
+
+    handler.do_POST()
+    data = read_response(handler)
+
+    assert data["result"]["id"] == "dup-task"
+    assert data["result"]["status"]["state"] in {"submitted", "working"}
+    assert queue.pending_count() == 1
+
+
+def test_cancel_then_late_complete_does_not_overwrite_canceled():
+    queue = server.TaskQueue()
+    queue.enqueue("race-task", "hi", {})
+    queue.cancel("race-task")
+    queue.complete("race-task", "late")
+
+    status = queue.get_status("race-task")
+    assert status["state"] == "canceled"
+    assert status["response"] == "(canceled)"

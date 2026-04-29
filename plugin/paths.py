@@ -41,6 +41,10 @@ def conversation_dir() -> Path:
     return plugin_state_dir() / "a2a_conversations"
 
 
+def task_store_path() -> Path:
+    return plugin_state_dir() / "a2a_tasks.json"
+
+
 def audit_log_path() -> Path:
     return plugin_state_dir() / "a2a_audit.jsonl"
 

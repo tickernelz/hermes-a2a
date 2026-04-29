@@ -28,9 +28,13 @@ from .config import get_security_config, get_server_config
 from .protocol import (
     ProtocolError,
     build_task_result,
+    extract_response_text,
+    extract_task_state,
     method_kind,
     normalize_inbound_message,
+    transition_state,
 )
+from . import task_store
 from .security import RateLimiter, audit, filter_outbound, sanitize_inbound
 
 logger = logging.getLogger(__name__)
@@ -69,7 +73,7 @@ class _PendingTask:
         self.response: Optional[str] = None
         self.ready = Event()
         self.created_at = time.time()
-        self.state = "pending"
+        self.state = "submitted"
 
 
 class TaskQueue:
@@ -125,31 +129,40 @@ class TaskQueue:
 
     def complete(self, task_id: str, response: str) -> None:
         with self._lock:
+            if task_id in self._completed:
+                return
             self._processing.discard(task_id)
             task = self._pending.pop(task_id, None)
             if task:
-                task.state = "completed"
-                task.response = response
+                task.state = transition_state(task.state, "completed")
+                if task.state == "completed":
+                    task.response = response
                 task.ready.set()
                 self._cache_completed(task)
 
     def fail(self, task_id: str, response: str) -> None:
         with self._lock:
+            if task_id in self._completed:
+                return
             self._processing.discard(task_id)
             task = self._pending.pop(task_id, None)
             if task:
-                task.state = "failed"
-                task.response = response
+                task.state = transition_state(task.state, "failed")
+                if task.state == "failed":
+                    task.response = response
                 task.ready.set()
                 self._cache_completed(task)
 
     def cancel(self, task_id: str) -> None:
         with self._lock:
+            if task_id in self._completed:
+                return
             self._processing.discard(task_id)
             task = self._pending.pop(task_id, None)
             if task:
-                task.state = "canceled"
-                task.response = "(canceled)"
+                task.state = transition_state(task.state, "canceled")
+                if task.state == "canceled":
+                    task.response = "(canceled)"
                 task.ready.set()
                 self._cache_completed(task)
 
@@ -157,7 +170,7 @@ class TaskQueue:
         with self._lock:
             task = self._pending.get(task_id)
             if task:
-                return {"state": task.state if task.state != "pending" else "working"}
+                return {"state": task.state}
             task = self._completed.get(task_id)
             if task:
                 data = {"state": task.state}
@@ -277,6 +290,41 @@ def _trigger_webhook(task_id: str = ""):
 
 def _task_failed(task_id: str, message: str, *, native: bool = False, context_id: str = "") -> dict:
     return build_task_result(task_id, "failed", message, native=native, context_id=context_id)
+
+
+
+
+def _background_requested(params: dict, message: dict, metadata: dict) -> bool:
+    return any(bool(value) for value in (
+        params.get("background"),
+        params.get("notify"),
+        message.get("background"),
+        message.get("notify"),
+        metadata.get("background"),
+        metadata.get("notify"),
+    ))
+
+
+def _notify_text(params: dict) -> str:
+    if isinstance(params.get("message"), dict):
+        text = extract_response_text(params.get("message", {}))
+        if text:
+            return text
+    if isinstance(params.get("status"), dict):
+        text = extract_response_text({"status": params.get("status")})
+        if text:
+            return text
+    if "response" in params:
+        return str(params.get("response") or "")
+    return ""
+
+
+def _notify_state(params: dict) -> str:
+    if "state" in params:
+        return str(params.get("state") or "completed")
+    if isinstance(params.get("status"), dict):
+        return extract_task_state({"status": params.get("status")})
+    return "completed"
 
 
 class A2ARequestHandler(BaseHTTPRequestHandler):
@@ -400,7 +448,17 @@ class A2ARequestHandler(BaseHTTPRequestHandler):
                 return
             tid = _safe_id(raw_tid, fallback="")
             task_queue.cancel(tid)
+            task_store.update_task(tid, state="canceled", response="(canceled)")
             result = build_task_result(tid, "canceled", "(canceled)", native=native, context_id=tid)
+        elif kind == "notify":
+            raw_tid = params.get("id") or params.get("taskId") or params.get("task_id")
+            if not raw_tid:
+                self._send_json({"jsonrpc": "2.0", "error": {"code": -32602, "message": "Missing task id"}, "id": rpc_id}, 400)
+                return
+            result = self._handle_task_notify(params, native=native)
+            if result is None:
+                self._send_json({"jsonrpc": "2.0", "error": {"code": -32001, "message": "Task not found"}, "id": rpc_id}, 404)
+                return
         else:
             self._send_json({
                 "jsonrpc": "2.0",
@@ -469,11 +527,28 @@ class A2ARequestHandler(BaseHTTPRequestHandler):
         if task_queue.pending_count() >= _MAX_PENDING:
             return _task_failed(task_id, "Agent busy — too many pending tasks", native=native, context_id=context_id)
 
+        background = _background_requested(params, message, metadata)
         task = task_queue.enqueue(task_id, user_text, metadata)
         if task is None:
-            return _task_failed(task_id, "Task ID already in use", native=native, context_id=context_id)
+            status = task_queue.get_status(task_id)
+            return build_task_result(task_id, status["state"], status.get("response", ""), native=native, context_id=context_id or task_id)
+
+        if background:
+            task_store.create_task(
+                task_id,
+                direction="inbound",
+                agent_name=str(metadata.get("sender_name") or "remote"),
+                url=f"http://{self.client_address[0]}",
+                state="submitted",
+                context_id=context_id,
+                local_task_id=task_id,
+                notify_requested=bool(metadata.get("notify") or params.get("notify")),
+            )
 
         threading.Thread(target=_trigger_webhook, args=(task_id,), daemon=True).start()
+
+        if background:
+            return build_task_result(task_id, "submitted", "(submitted — poll with GetTask/tasks/get)", native=native, context_id=context_id)
 
         task.ready.wait(timeout=_RESPONSE_TIMEOUT)
 
@@ -484,7 +559,26 @@ class A2ARequestHandler(BaseHTTPRequestHandler):
         audit.log("task_completed", {"task_id": task_id, "response_length": len(filtered)})
 
         state = task.state if task.state in {"completed", "failed", "canceled"} else "completed"
+        task_store.update_task(task_id, state=state, response=filtered)
         return build_task_result(task_id, state, filtered, native=native, context_id=context_id)
+
+    def _handle_task_notify(self, params: dict, *, native: bool = False) -> dict | None:
+        raw_tid = params.get("id") or params.get("taskId") or params.get("task_id")
+        agent_name = str(params.get("from") or params.get("agent_name") or "").strip()
+        record = task_store.find_task(str(raw_tid), agent_name=agent_name) or (task_store.find_task(str(raw_tid)) if not agent_name else None)
+        if not record:
+            return None
+        text = truncate_response_text(filter_outbound(_notify_text(params)), self.server.max_response_chars)
+        state = _notify_state(params)
+        updated = task_store.update_task(record["task_id"], state=state, response=text) or record
+        if updated.get("state") == state:
+            try:
+                from .persistence import update_exchange
+                update_exchange(agent_name=updated.get("agent_name") or agent_name or "remote", task_id=updated["task_id"], inbound_text=text)
+            except Exception:
+                logger.debug("[A2A] Failed to update notified exchange", exc_info=True)
+            threading.Thread(target=_trigger_webhook, args=(updated["task_id"],), daemon=True).start()
+        return build_task_result(updated["task_id"], updated.get("state", state), updated.get("response", text), native=native, context_id=updated.get("context_id") or updated["task_id"])
 
 
 class A2AServer(ThreadingHTTPServer):
@@ -544,7 +638,7 @@ class A2AServer(ThreadingHTTPServer):
             "defaultOutputModes": ["text/plain", "application/json"],
             "capabilities": {
                 "streaming": False,
-                "pushNotifications": False,
+                "pushNotifications": bool(self.public_url and self.auth_token),
                 "multiTurn": False,
                 "stateTransitionHistory": False,
                 "structuredMetadata": True,

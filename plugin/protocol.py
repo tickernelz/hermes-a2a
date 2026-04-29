@@ -77,6 +77,27 @@ def to_legacy_state(state: Any) -> str:
     return _LEGACY_STATES.get(normalize_state(state), "unknown")
 
 
+_TERMINAL_STATES = {"completed", "failed", "canceled", "rejected", "expired"}
+_ALLOWED_TRANSITIONS = {
+    "unknown": {"submitted", "working", "completed", "failed", "canceled", "rejected", "expired"},
+    "submitted": {"working", "completed", "failed", "canceled", "rejected", "expired"},
+    "working": {"completed", "failed", "canceled", "rejected", "expired"},
+}
+
+
+def is_terminal_state(state: Any) -> bool:
+    return normalize_state(state) in _TERMINAL_STATES
+
+
+def transition_state(current: Any, requested: Any) -> str:
+    old = normalize_state(current)
+    new = normalize_state(requested)
+    if is_terminal_state(old):
+        return old
+    allowed = _ALLOWED_TRANSITIONS.get(old, _ALLOWED_TRANSITIONS["unknown"])
+    return new if new in allowed else old
+
+
 def method_kind(method: str) -> tuple[str | None, bool]:
     name = str(method or "").strip()
     lowered = name.lower()
@@ -92,6 +113,10 @@ def method_kind(method: str) -> tuple[str | None, bool]:
         return "cancel", False
     if lowered == "canceltask":
         return "cancel", True
+    if lowered in {"tasks/notify", "task/notify"}:
+        return "notify", False
+    if lowered == "tasknotification":
+        return "notify", True
     return None, False
 
 

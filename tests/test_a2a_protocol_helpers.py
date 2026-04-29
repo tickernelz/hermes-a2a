@@ -166,3 +166,15 @@ def test_extract_task_response_text_reads_status_message_parts():
     }
 
     assert protocol.extract_response_text(task) == "status text"
+
+
+def test_method_kind_accepts_notify_aliases():
+    assert protocol.method_kind("tasks/notify") == ("notify", False)
+    assert protocol.method_kind("TaskNotification") == ("notify", True)
+
+
+def test_transition_state_terminal_immutable():
+    assert protocol.transition_state("submitted", "working") == "working"
+    assert protocol.transition_state("completed", "working") == "completed"
+    assert protocol.is_terminal_state("completed") is True
+    assert protocol.is_terminal_state("working") is False
