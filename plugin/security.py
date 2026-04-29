@@ -12,6 +12,8 @@ from pathlib import Path
 from threading import Lock
 from typing import Dict, Optional
 
+from .paths import audit_log_path
+
 logger = logging.getLogger(__name__)
 
 INJECTION_PATTERNS = [
@@ -75,20 +77,22 @@ _AUDIT_MAX_SIZE = 10 * 1024 * 1024  # 10 MB
 
 class AuditLogger:
     def __init__(self, log_path: Optional[Path] = None):
-        if log_path is None:
-            log_path = Path.home() / ".hermes" / "a2a_audit.jsonl"
         self.log_path = log_path
         self._lock = Lock()
 
     def _rotate_if_needed(self) -> None:
         try:
-            if self.log_path.exists() and self.log_path.stat().st_size > _AUDIT_MAX_SIZE:
-                rotated = self.log_path.with_suffix(".jsonl.old")
+            path = self._path()
+            if path.exists() and path.stat().st_size > _AUDIT_MAX_SIZE:
+                rotated = path.with_suffix(".jsonl.old")
                 if rotated.exists():
                     rotated.unlink()
-                self.log_path.rename(rotated)
+                path.rename(rotated)
         except Exception:
             pass
+
+    def _path(self) -> Path:
+        return self.log_path or audit_log_path()
 
     def log(self, event_type: str, data: dict) -> None:
         entry = {
@@ -98,9 +102,10 @@ class AuditLogger:
         }
         try:
             with self._lock:
-                self.log_path.parent.mkdir(parents=True, exist_ok=True)
+                path = self._path()
+                path.parent.mkdir(parents=True, exist_ok=True)
                 self._rotate_if_needed()
-                with open(self.log_path, "a", encoding="utf-8") as f:
+                with open(path, "a", encoding="utf-8") as f:
                     f.write(json.dumps(entry, ensure_ascii=False) + "\n")
         except Exception:
             logger.debug("Failed to write A2A audit log", exc_info=True)

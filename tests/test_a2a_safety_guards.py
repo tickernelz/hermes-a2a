@@ -133,4 +133,41 @@ def test_post_llm_completes_only_one_active_task(monkeypatch):
     a2a_plugin._on_post_llm_call(assistant_response="reply")
 
     assert completed == [("task-1", "reply")]
+    fake_queue.fail.assert_not_called()
     a2a_plugin._active_a2a_tasks.clear()
+
+
+def test_post_llm_fails_active_task_when_response_missing(monkeypatch):
+    failed = []
+    fake_queue = MagicMock()
+    fake_queue.fail.side_effect = lambda task_id, response: failed.append((task_id, response))
+    fake_queue.pending_count.return_value = 0
+    monkeypatch.setattr(a2a_plugin.a2a_server, "task_queue", fake_queue)
+    monkeypatch.setattr(a2a_plugin, "save_exchange", MagicMock())
+
+    a2a_plugin._active_a2a_tasks.clear()
+    a2a_plugin._active_a2a_tasks["task-1"] = {"text": "first", "metadata": {}}
+
+    a2a_plugin._on_post_llm_call(assistant_response=None)
+
+    assert failed == [("task-1", "(no assistant response produced)")]
+    fake_queue.complete.assert_not_called()
+    assert a2a_plugin._active_a2a_tasks == {}
+
+
+def test_post_llm_fails_active_task_when_response_empty(monkeypatch):
+    failed = []
+    fake_queue = MagicMock()
+    fake_queue.fail.side_effect = lambda task_id, response: failed.append((task_id, response))
+    fake_queue.pending_count.return_value = 0
+    monkeypatch.setattr(a2a_plugin.a2a_server, "task_queue", fake_queue)
+    monkeypatch.setattr(a2a_plugin, "save_exchange", MagicMock())
+
+    a2a_plugin._active_a2a_tasks.clear()
+    a2a_plugin._active_a2a_tasks["task-1"] = {"text": "first", "metadata": {}}
+
+    a2a_plugin._on_post_llm_call(assistant_response="   ")
+
+    assert failed == [("task-1", "(empty assistant response produced)")]
+    fake_queue.complete.assert_not_called()
+    assert a2a_plugin._active_a2a_tasks == {}

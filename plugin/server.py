@@ -16,6 +16,7 @@ import threading
 import time
 import uuid
 import builtins
+import re
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from threading import Event, Lock
 from collections import OrderedDict
@@ -23,6 +24,7 @@ from typing import Optional
 import urllib.request
 import urllib.error
 
+from .config import get_security_config, get_server_config
 from .security import RateLimiter, audit, filter_outbound, sanitize_inbound
 
 logger = logging.getLogger(__name__)
@@ -40,8 +42,19 @@ except Exception:
     HERMES_VERSION = "0.0.0"
 
 
+_SAFE_ID_RE = re.compile(r"[^A-Za-z0-9_.:@-]+")
+
+
+def _safe_id(value: object, *, fallback: str | None = None, max_length: int = 96) -> str:
+    raw = str(value or "").strip()
+    if not raw and fallback is not None:
+        raw = fallback
+    raw = _SAFE_ID_RE.sub("-", raw).strip("-._:@")
+    return (raw[:max_length] or (fallback or str(uuid.uuid4())))
+
+
 class _PendingTask:
-    __slots__ = ("task_id", "text", "metadata", "response", "ready", "created_at")
+    __slots__ = ("task_id", "text", "metadata", "response", "ready", "created_at", "state")
 
     def __init__(self, task_id: str, text: str, metadata: dict):
         self.task_id = task_id
@@ -50,6 +63,7 @@ class _PendingTask:
         self.response: Optional[str] = None
         self.ready = Event()
         self.created_at = time.time()
+        self.state = "pending"
 
 
 class TaskQueue:
@@ -58,6 +72,7 @@ class TaskQueue:
     def __init__(self):
         self._pending: OrderedDict[str, _PendingTask] = OrderedDict()
         self._completed: OrderedDict[str, _PendingTask] = OrderedDict()
+        self._processing: set[str] = set()
         self._lock = Lock()
 
     def pending_count(self) -> int:
@@ -67,48 +82,76 @@ class TaskQueue:
     def enqueue(self, task_id: str, text: str, metadata: dict) -> _PendingTask | None:
         task = _PendingTask(task_id, text, metadata)
         with self._lock:
-            if task_id in self._pending:
+            if task_id in self._pending or task_id in self._completed:
                 return None
             self._pending[task_id] = task
             while len(self._pending) > _TASK_CACHE_MAX:
                 _, old = self._pending.popitem(last=False)
+                self._processing.discard(old.task_id)
+                old.state = "failed"
                 old.response = "(dropped — queue overflow)"
                 old.ready.set()
+                self._completed[old.task_id] = old
         return task
 
     def drain_pending(self, exclude: set[str] | None = None) -> list[_PendingTask]:
         with self._lock:
-            if exclude:
-                return [t for t in self._pending.values() if t.task_id not in exclude]
-            return list(self._pending.values())
+            skip = set(exclude or ()) | self._processing
+            return [t for t in self._pending.values() if t.task_id not in skip]
+
+    def mark_processing(self, task_id: str) -> None:
+        with self._lock:
+            task = self._pending.get(task_id)
+            if task:
+                task.state = "processing"
+                self._processing.add(task_id)
+
+    def _cache_completed(self, task: _PendingTask) -> None:
+        self._completed[task.task_id] = task
+        while len(self._completed) > _TASK_CACHE_MAX:
+            self._completed.popitem(last=False)
 
     def complete(self, task_id: str, response: str) -> None:
         with self._lock:
+            self._processing.discard(task_id)
             task = self._pending.pop(task_id, None)
             if task:
+                task.state = "completed"
                 task.response = response
                 task.ready.set()
-                self._completed[task_id] = task
-                while len(self._completed) > _TASK_CACHE_MAX:
-                    self._completed.popitem(last=False)
+                self._cache_completed(task)
+
+    def fail(self, task_id: str, response: str) -> None:
+        with self._lock:
+            self._processing.discard(task_id)
+            task = self._pending.pop(task_id, None)
+            if task:
+                task.state = "failed"
+                task.response = response
+                task.ready.set()
+                self._cache_completed(task)
 
     def cancel(self, task_id: str) -> None:
         with self._lock:
+            self._processing.discard(task_id)
             task = self._pending.pop(task_id, None)
             if task:
+                task.state = "canceled"
                 task.response = "(canceled)"
                 task.ready.set()
-                self._completed[task_id] = task
+                self._cache_completed(task)
 
     def get_status(self, task_id: str) -> dict:
         with self._lock:
-            if task_id in self._pending:
-                return {"state": "working"}
+            task = self._pending.get(task_id)
+            if task:
+                return {"state": task.state if task.state != "pending" else "working"}
             task = self._completed.get(task_id)
             if task:
-                if task.response == "(canceled)":
-                    return {"state": "canceled"}
-                return {"state": "completed", "response": filter_outbound(task.response)}
+                data = {"state": task.state}
+                if task.response is not None:
+                    data["response"] = filter_outbound(task.response)
+                return data
         return {"state": "unknown"}
 
 
@@ -136,6 +179,7 @@ def _is_usable_task_queue(queue) -> bool:
             "pending_count",
             "enqueue",
             "drain_pending",
+            "mark_processing",
             "complete",
             "cancel",
             "get_status",
@@ -166,14 +210,14 @@ def clear_runtime_server(server=None) -> None:
     state["thread"] = None
 
 
-def _trigger_webhook():
+def _trigger_webhook(task_id: str = ""):
     """POST to the internal webhook to trigger an agent turn."""
     secret = os.getenv("A2A_WEBHOOK_SECRET", "")
     if not secret:
         return
 
     port = int(os.getenv("WEBHOOK_PORT", "8644"))
-    body = json.dumps({"event_type": "a2a_inbound"}).encode()
+    body = json.dumps({"event_type": "a2a_inbound", "task_id": task_id}).encode()
     sig = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
 
     req = urllib.request.Request(
@@ -190,6 +234,14 @@ def _trigger_webhook():
             logger.debug("[A2A] Webhook trigger: %d", resp.status)
     except Exception as e:
         logger.debug("[A2A] Webhook trigger failed: %s", e)
+
+
+def _task_failed(task_id: str, message: str) -> dict:
+    return {
+        "id": task_id,
+        "status": {"state": "failed"},
+        "artifacts": [{"parts": [{"type": "text", "text": message}], "index": 0}],
+    }
 
 
 class A2ARequestHandler(BaseHTTPRequestHandler):
@@ -211,8 +263,17 @@ class A2ARequestHandler(BaseHTTPRequestHandler):
     def _check_auth(self) -> bool:
         token = self.server.auth_token
         if not token:
+            if self.server.require_auth:
+                logger.warning("[A2A] Rejecting unauthenticated request because A2A_REQUIRE_AUTH is enabled")
+                return False
             remote = self.client_address[0]
-            return remote in ("127.0.0.1", "::1")
+            allowed = remote in ("127.0.0.1", "::1")
+            if allowed:
+                logger.warning(
+                    "[A2A] Allowing unauthenticated localhost request; set "
+                    "A2A_AUTH_TOKEN and A2A_REQUIRE_AUTH=true"
+                )
+            return allowed
         auth_header = self.headers.get("Authorization", "")
         if not auth_header.startswith("Bearer "):
             return False
@@ -271,22 +332,31 @@ class A2ARequestHandler(BaseHTTPRequestHandler):
             )
             return
 
+        if not isinstance(body, dict):
+            self._send_json({"jsonrpc": "2.0", "error": {"code": -32600, "message": "Invalid Request"}, "id": None}, 400)
+            return
+
         method = body.get("method", "")
         params = body.get("params", {})
         rpc_id = body.get("id")
+        if params is None:
+            params = {}
+        if not isinstance(params, dict):
+            self._send_json({"jsonrpc": "2.0", "error": {"code": -32602, "message": "Invalid params"}, "id": rpc_id}, 400)
+            return
 
         audit.log("rpc_request", {"method": method, "client": self.client_address[0]})
 
         if method == "tasks/send":
             result = self._handle_task_send(params)
         elif method == "tasks/get":
-            tid = params.get("id", "")
+            tid = _safe_id(params.get("id", ""), fallback="")
             status = task_queue.get_status(tid)
             result = {"id": tid, "status": {"state": status["state"]}}
             if status.get("response"):
                 result["artifacts"] = [{"parts": [{"type": "text", "text": status["response"]}], "index": 0}]
         elif method == "tasks/cancel":
-            tid = params.get("id", "")
+            tid = _safe_id(params.get("id", ""), fallback="")
             task_queue.cancel(tid)
             result = {"id": tid, "status": {"state": "canceled"}}
         else:
@@ -300,47 +370,45 @@ class A2ARequestHandler(BaseHTTPRequestHandler):
         self._send_json({"jsonrpc": "2.0", "result": result, "id": rpc_id})
 
     def _handle_task_send(self, params: dict) -> dict:
-        task_id = params.get("id", str(uuid.uuid4()))
+        task_id = _safe_id(params.get("id"), fallback=str(uuid.uuid4()))
         message = params.get("message", {})
+        if not isinstance(message, dict):
+            return _task_failed(task_id, "Invalid message")
+
+        parts = message.get("parts", [])
+        if not isinstance(parts, list):
+            return _task_failed(task_id, "Invalid message parts")
 
         text_parts = []
-        for part in message.get("parts", []):
-            if part.get("type") == "text":
-                text_parts.append(part.get("text", ""))
+        for part in parts:
+            if isinstance(part, dict) and part.get("type") == "text":
+                text_parts.append(str(part.get("text", "")))
         user_text = "\n".join(text_parts)
 
         if not user_text.strip():
-            return {
-                "id": task_id,
-                "status": {"state": "failed"},
-                "artifacts": [{"parts": [{"type": "text", "text": "Empty message"}], "index": 0}],
-            }
+            return _task_failed(task_id, "Empty message")
 
-        user_text = sanitize_inbound(user_text)
+        user_text = sanitize_inbound(user_text, max_length=self.server.max_message_chars)
         metadata = message.get("metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
         if "sender_name" not in metadata:
-            metadata["sender_name"] = metadata.get("agent_name", f"agent-{self.client_address[0]}")
-        raw_name = metadata.get("sender_name", "")
-        metadata["sender_name"] = "".join(c for c in raw_name if c.isalnum() or c in "-_.@ ")[:64]
+            from_field = params.get("from") or (params.get("sender") if isinstance(params.get("sender"), dict) else {}).get("name")
+            metadata["sender_name"] = from_field or metadata.get("agent_name", f"agent-{self.client_address[0]}")
+        raw_name = str(metadata.get("sender_name") or "")
+        metadata["sender_name"] = "".join(c for c in raw_name if c.isalnum() or c in "-_.@ ")[:64] or "remote"
+        metadata["reply_to_task_id"] = _safe_id(metadata.get("reply_to_task_id", ""), fallback="", max_length=64) if metadata.get("reply_to_task_id") else ""
 
         audit.log("task_received", {"task_id": task_id, "length": len(user_text)})
 
         if task_queue.pending_count() >= _MAX_PENDING:
-            return {
-                "id": task_id,
-                "status": {"state": "failed"},
-                "artifacts": [{"parts": [{"type": "text", "text": "Agent busy — too many pending tasks"}], "index": 0}],
-            }
+            return _task_failed(task_id, "Agent busy — too many pending tasks")
 
         task = task_queue.enqueue(task_id, user_text, metadata)
         if task is None:
-            return {
-                "id": task_id,
-                "status": {"state": "failed"},
-                "artifacts": [{"parts": [{"type": "text", "text": "Task ID already in use"}], "index": 0}],
-            }
+            return _task_failed(task_id, "Task ID already in use")
 
-        threading.Thread(target=_trigger_webhook, daemon=True).start()
+        threading.Thread(target=_trigger_webhook, args=(task_id,), daemon=True).start()
 
         task.ready.wait(timeout=_RESPONSE_TIMEOUT)
 
@@ -354,9 +422,10 @@ class A2ARequestHandler(BaseHTTPRequestHandler):
         filtered = filter_outbound(task.response)
         audit.log("task_completed", {"task_id": task_id, "response_length": len(filtered)})
 
+        state = task.state if task.state in {"completed", "failed", "canceled"} else "completed"
         return {
             "id": task_id,
-            "status": {"state": "completed"},
+            "status": {"state": state},
             "artifacts": [{"parts": [{"type": "text", "text": filtered}], "index": 0}],
         }
 
@@ -371,18 +440,28 @@ class A2AServer(ThreadingHTTPServer):
     daemon_threads = True
 
     def __init__(self, host: str, port: int):
+        server_cfg = get_server_config()
+        security_cfg = get_security_config()
         self.agent_name = os.getenv("A2A_AGENT_NAME", "hermes-agent")
         self.agent_description = os.getenv("A2A_AGENT_DESCRIPTION", "A self-improving AI agent powered by Hermes")
         self.auth_token = os.getenv("A2A_AUTH_TOKEN", "")
-        self.limiter = RateLimiter()
+        self.require_auth = server_cfg.require_auth
+        self.public_url = server_cfg.public_url
+        self.max_message_chars = security_cfg.max_message_chars
+        self.limiter = RateLimiter(max_requests=security_cfg.rate_limit_per_minute)
+        if self.require_auth and not self.auth_token:
+            logger.warning("[A2A] A2A_REQUIRE_AUTH is enabled but A2A_AUTH_TOKEN is missing; POST requests will be rejected")
         super().__init__((host, port), A2ARequestHandler)
 
     def build_agent_card(self) -> dict:
-        host, port = self.server_address
+        public_url = self.public_url
+        if not public_url:
+            host, port = self.server_address
+            public_url = f"http://{host}:{port}"
         return {
             "name": self.agent_name,
             "description": self.agent_description,
-            "url": f"http://{host}:{port}",
+            "url": public_url,
             "version": HERMES_VERSION,
             "protocol": "a2a",
             "protocolVersion": "0.2.0",

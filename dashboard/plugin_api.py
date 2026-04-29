@@ -22,12 +22,15 @@ from typing import Any
 
 from fastapi import APIRouter
 
+try:
+    from plugin.config import load_agents
+    from plugin.paths import config_path, conversation_dir, dashboard_meta_path
+except Exception:  # pragma: no cover - fallback when loaded inside plugin package
+    from ..config import load_agents
+    from ..paths import config_path, conversation_dir, dashboard_meta_path
+
 router = APIRouter()
 logger = logging.getLogger(__name__)
-
-_CONV_DIR = Path.home() / ".hermes" / "a2a_conversations"
-_CONFIG_PATH = Path.home() / ".hermes" / "config.yaml"
-_META_PATH = Path.home() / ".hermes" / "a2a_dashboard_meta.json"
 _meta_lock = Lock()
 
 _health_cache: dict[str, dict] = {}
@@ -51,7 +54,7 @@ def _empty_meta() -> dict:
 def _load_meta() -> dict:
     with _meta_lock:
         try:
-            data = json.loads(_META_PATH.read_text(encoding="utf-8"))
+            data = json.loads(dashboard_meta_path().read_text(encoding="utf-8"))
         except Exception:
             return _empty_meta()
 
@@ -71,8 +74,11 @@ def _load_meta() -> dict:
 
 def _save_meta(meta: dict) -> None:
     with _meta_lock:
-        _META_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _META_PATH.write_text(json.dumps(meta, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+        path = dashboard_meta_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_name(path.name + ".tmp")
+        tmp_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+        os.replace(tmp_path, path)
 
 
 def _hidden_tasks(meta: dict, agent_name: str) -> set[str]:
@@ -89,7 +95,7 @@ def _filter_hidden_messages(agent_name: str, messages: list[dict], meta: dict) -
 
 def _all_task_ids(agent_name: str) -> list[str]:
     safe_agent = _safe_name(agent_name)
-    agent_dir = _CONV_DIR / safe_agent
+    agent_dir = conversation_dir() / safe_agent
     if not agent_dir.is_dir():
         return []
 
@@ -131,11 +137,7 @@ def _cleanup_meta(meta: dict, agents: dict[str, Path]) -> bool:
 
 
 def _load_agents() -> list[dict]:
-    try:
-        from hermes_cli.config import load_config
-        return load_config().get("a2a", {}).get("agents", [])
-    except Exception:
-        return []
+    return load_agents()
 
 
 def _safe_name(name: str) -> str:
@@ -143,9 +145,10 @@ def _safe_name(name: str) -> str:
 
 
 def _conversation_agents() -> dict[str, Path]:
-    if not _CONV_DIR.is_dir():
+    conv_dir = conversation_dir()
+    if not conv_dir.is_dir():
         return {}
-    return {d.name: d for d in _CONV_DIR.iterdir() if d.is_dir()}
+    return {d.name: d for d in conv_dir.iterdir() if d.is_dir()}
 
 
 def _last_contact(agent_dir: Path) -> str | None:
@@ -397,7 +400,7 @@ def _parse_conversation_file(filepath: Path) -> list[dict]:
 @router.get("/conversations/{agent_name}")
 async def conversations(agent_name: str, days: int = 30):
     agent_name = _safe_name(agent_name)
-    agent_dir = _CONV_DIR / agent_name
+    agent_dir = conversation_dir() / agent_name
     if not agent_dir.is_dir():
         return {"agent": agent_name, "days": [], "total_messages": 0}
 
@@ -424,7 +427,7 @@ async def conversations(agent_name: str, days: int = 30):
 @router.get("/conversations/{agent_name}/check")
 async def check_new(agent_name: str, since: str = ""):
     agent_name = _safe_name(agent_name)
-    agent_dir = _CONV_DIR / agent_name
+    agent_dir = conversation_dir() / agent_name
     if not agent_dir.is_dir():
         return {"new_messages": 0, "mtime": 0}
 
@@ -535,7 +538,7 @@ def _get_dashboard_route() -> tuple[str, str]:
 def _find_exchange(agent_name: str, task_id: str, days: int = 3) -> dict | None:
     """Find a persisted A2A exchange by task id."""
     safe_agent = _safe_name(agent_name)
-    agent_dir = _CONV_DIR / safe_agent
+    agent_dir = conversation_dir() / safe_agent
     if not agent_dir.is_dir():
         return None
 
@@ -564,7 +567,7 @@ def _parse_message_time(timestamp: str) -> float:
 def _find_exchange_by_outbound(agent_name: str, message: str, created_at: float, days: int = 3) -> dict | None:
     """Find a persisted exchange by exact outbound text when task ids differ."""
     safe_agent = _safe_name(agent_name)
-    agent_dir = _CONV_DIR / safe_agent
+    agent_dir = conversation_dir() / safe_agent
     if not agent_dir.is_dir():
         return None
 
@@ -776,7 +779,7 @@ async def conversation_summary(agent_name: str):
     if cached and time.time() - cached.get("ts", 0) < 1800:
         return {"summary": cached["text"]}
 
-    agent_dir = _CONV_DIR / agent_name
+    agent_dir = conversation_dir() / agent_name
     if not agent_dir.is_dir():
         return {"summary": ""}
 

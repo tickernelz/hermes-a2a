@@ -5,12 +5,25 @@ Format matches ~/inbox/conversations/{agent}/{date}.md for consistency.
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 
-_CONV_DIR = Path.home() / ".hermes" / "a2a_conversations"
+from .paths import conversation_dir
+from .security import filter_outbound
+
 _lock = Lock()
+
+
+def _atomic_write(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(path.name + ".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        f.write(content)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, path)
 
 
 def save_exchange(
@@ -25,9 +38,11 @@ def save_exchange(
     today = now.strftime("%Y-%m-%d")
     timestamp = now.strftime("%H:%M:%S")
     safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in agent_name.lower())
-    directory = _CONV_DIR / safe_name
+    directory = conversation_dir() / safe_name
     filepath = directory / f"{today}.md"
 
+    inbound_text = filter_outbound(inbound_text)
+    outbound_text = filter_outbound(outbound_text)
     intent = (metadata or {}).get("intent", "")
     reply_to = (metadata or {}).get("reply_to_task_id", "")
 
@@ -51,10 +66,11 @@ def save_exchange(
     entry_lines.append("---")
     entry_lines.append("")
 
+    entry = "\n".join(entry_lines)
+
     with _lock:
-        directory.mkdir(parents=True, exist_ok=True)
-        with open(filepath, "a", encoding="utf-8") as f:
-            f.write("\n".join(entry_lines))
+        existing = filepath.read_text(encoding="utf-8") if filepath.exists() else ""
+        _atomic_write(filepath, existing + entry)
 
     return filepath
 
@@ -65,10 +81,11 @@ def update_exchange(
     inbound_text: str,
 ) -> bool:
     """Update the inbound text of an existing exchange (e.g. replace 'waiting' with actual reply)."""
+    inbound_text = filter_outbound(inbound_text)
     safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in agent_name.lower())
     now = datetime.now(timezone.utc)
     today = now.strftime("%Y-%m-%d")
-    filepath = _CONV_DIR / safe_name / f"{today}.md"
+    filepath = conversation_dir() / safe_name / f"{today}.md"
 
     if not filepath.exists():
         return False
@@ -98,5 +115,5 @@ def update_exchange(
         if updated_block == block:
             return False
         updated = content[:block_start] + updated_block + content[block_end:]
-        filepath.write_text(updated, encoding="utf-8")
+        _atomic_write(filepath, updated)
     return True

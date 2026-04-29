@@ -11,6 +11,8 @@ import threading
 from .schemas import A2A_DISCOVER, A2A_CALL, A2A_LIST
 from .tools import handle_discover, handle_call, handle_list
 from . import server as a2a_server
+from .config import get_server_config, load_agents
+from .paths import conversation_dir
 from .persistence import save_exchange
 from .security import audit
 
@@ -87,8 +89,9 @@ def _handle_a2a_command(raw_args: str) -> str:
 
 
 def _cmd_status() -> str:
-    host = os.getenv("A2A_HOST", a2a_server.DEFAULT_HOST)
-    port = int(os.getenv("A2A_PORT", str(a2a_server.DEFAULT_PORT)))
+    server_cfg = get_server_config()
+    host = server_cfg.host
+    port = server_cfg.port
     name = os.getenv("A2A_AGENT_NAME", "hermes-agent")
     pending = a2a_server.task_queue.pending_count()
     state = a2a_server.get_runtime_state()
@@ -110,14 +113,11 @@ def _cmd_status() -> str:
 
 
 def _cmd_agents() -> str:
-    from pathlib import Path
-    from .tools import _load_configured_agents
-
-    agents = _load_configured_agents()
+    agents = load_agents()
     if not agents:
-        return "No agents configured. Add agents to ~/.hermes/config.yaml under a2a.agents"
+        return "No agents configured. Add agents to the active Hermes profile config under a2a.agents"
 
-    conv_dir = Path.home() / ".hermes" / "a2a_conversations"
+    conv_dir = conversation_dir()
     lines = []
     for a in agents:
         name = a.get("name", "unnamed")
@@ -144,8 +144,9 @@ def _cmd_agents() -> str:
 
 def _start_server():
     global _server, _server_thread
-    host = os.getenv("A2A_HOST", a2a_server.DEFAULT_HOST)
-    port = int(os.getenv("A2A_PORT", str(a2a_server.DEFAULT_PORT)))
+    server_cfg = get_server_config()
+    host = server_cfg.host
+    port = server_cfg.port
 
     _stop_server()
 
@@ -267,6 +268,7 @@ def _on_pre_gateway_dispatch(event=None, **kwargs):
     task = pending[0]
     if not _activate_task_if_idle(task):
         return {"action": "skip", "reason": "A2A task already active"}
+    a2a_server.task_queue.mark_processing(task.task_id)
 
     return {"action": "rewrite", "text": _format_task_context(task, include_privacy_note=True)}
 
@@ -299,6 +301,7 @@ def _on_pre_llm_call(conversation_history=None, user_message=None, **kwargs):
 
     if not _activate_task_if_idle(task):
         return None
+    a2a_server.task_queue.mark_processing(task.task_id)
 
     return {"context": _format_task_context(task, include_privacy_note=True)}
 
@@ -311,10 +314,14 @@ def _on_post_llm_call(assistant_response=None, **kwargs):
         snapshot = dict(_active_a2a_tasks)
         _active_a2a_tasks.clear()
 
-    if not assistant_response:
-        return
-
-    response_text = assistant_response if isinstance(assistant_response, str) else str(assistant_response)
+    if assistant_response is None:
+        response_text = "(no assistant response produced)"
+        complete_as_failure = True
+    else:
+        response_text = assistant_response if isinstance(assistant_response, str) else str(assistant_response)
+        complete_as_failure = not bool(response_text.strip())
+        if complete_as_failure:
+            response_text = "(empty assistant response produced)"
 
     if len(snapshot) > 1:
         logger.warning(
@@ -322,7 +329,10 @@ def _on_post_llm_call(assistant_response=None, **kwargs):
         )
 
     task_id, info = next(iter(snapshot.items()))
-    a2a_server.task_queue.complete(task_id, response_text)
+    if complete_as_failure:
+        a2a_server.task_queue.fail(task_id, response_text)
+    else:
+        a2a_server.task_queue.complete(task_id, response_text)
 
     metadata = info.get("metadata", {})
     agent_name = metadata.get("sender_name", "remote")

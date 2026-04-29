@@ -8,7 +8,8 @@ import time
 import uuid
 from collections import deque
 from typing import Any, Dict, List
-from urllib.parse import urlparse
+
+from .config import get_security_config, load_agents, validate_url
 
 logger = logging.getLogger(__name__)
 
@@ -23,11 +24,7 @@ _rate_lock = threading.Lock()
 
 
 def _load_configured_agents() -> List[Dict[str, Any]]:
-    try:
-        from hermes_cli.config import load_config
-        return load_config().get("a2a", {}).get("agents", [])
-    except Exception:
-        return []
+    return load_agents()
 
 
 def _consume_rate_limit() -> bool:
@@ -46,38 +43,45 @@ def _normalize_url(url: str) -> str:
 
 
 def _validate_target_url(url: str) -> str:
-    url = _normalize_url(url)
-    parsed = urlparse(url)
-    if parsed.scheme not in ("http", "https") or not parsed.netloc:
-        raise ValueError("A2A URL must be an http(s) URL")
-    return url
+    return validate_url(url)
+
+
+def _agent_by_name(name: str) -> dict[str, Any] | None:
+    wanted = (name or "").strip().lower()
+    for agent in _load_configured_agents():
+        if str(agent.get("name", "")).strip().lower() == wanted:
+            return agent
+    return None
+
+
+def _agent_by_url(url: str) -> dict[str, Any] | None:
+    wanted = _normalize_url(url)
+    for agent in _load_configured_agents():
+        if _normalize_url(str(agent.get("url") or "")) == wanted:
+            return agent
+    return None
 
 
 def _resolve_target(name: str, url: str) -> tuple[str, str]:
     """Resolve an outbound target and only allow configured raw URLs by default."""
-    agents = _load_configured_agents()
-    auth_token = ""
-
     if name and not url:
-        for agent in agents:
-            if agent.get("name", "").lower() == name.lower():
-                return _validate_target_url(agent.get("url", "")), agent.get("auth_token", "")
-        raise ValueError(f"Agent '{name}' not found in config")
+        agent = _agent_by_name(name)
+        if not agent:
+            raise ValueError(f"Agent '{name}' not found in active Hermes profile config")
+        return _validate_target_url(agent.get("url", "")), agent.get("auth_token", "")
 
     url = _validate_target_url(url)
-    for agent in agents:
-        configured_url = _normalize_url(agent.get("url", ""))
-        if configured_url and configured_url == url:
-            auth_token = agent.get("auth_token", "")
-            break
-    else:
-        if os.getenv("A2A_ALLOW_UNCONFIGURED_URLS", "").lower() not in ("1", "true", "yes"):
-            raise ValueError(
-                "Direct A2A URL is not configured; use a configured agent name "
-                "or set A2A_ALLOW_UNCONFIGURED_URLS=true"
-            )
+    agent = _agent_by_url(url)
+    if agent:
+        return url, agent.get("auth_token", "")
 
-    return url, auth_token
+    if not get_security_config().allow_unconfigured_urls:
+        raise ValueError(
+            "Direct A2A URL is not configured; use a configured agent name "
+            "or set a2a.security.allow_unconfigured_urls=true / A2A_ALLOW_UNCONFIGURED_URLS=true"
+        )
+
+    return url, ""
 
 
 def _ok(data: dict) -> str:
@@ -214,7 +218,7 @@ def handle_call(args: dict, **kwargs) -> str:
             agent_name=agent_label,
             task_id=task_id,
             inbound_text="(waiting for reply…)",
-            outbound_text=message,
+            outbound_text=filtered_message,
             metadata={"intent": intent, "reply_to_task_id": reply_to_task_id},
             direction="outbound",
         )
@@ -302,7 +306,7 @@ def handle_list(args: dict, **kwargs) -> str:
     if not agents:
         return _ok({
             "agents": [],
-            "message": "No A2A agents configured. Add agents to ~/.hermes/config.yaml under a2a.agents",
+            "message": "No A2A agents configured. Add agents to the active Hermes profile config under a2a.agents",
         })
     return _ok({
         "agents": [
@@ -311,6 +315,8 @@ def handle_list(args: dict, **kwargs) -> str:
                 "url": a.get("url", ""),
                 "description": a.get("description", ""),
                 "has_auth": bool(a.get("auth_token")),
+                "enabled": a.get("enabled", True),
+                "trust_level": a.get("trust_level", ""),
             }
             for a in agents
         ],
