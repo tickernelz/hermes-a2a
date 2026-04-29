@@ -84,3 +84,19 @@ def test_all_metadata_fields_none(monkeypatch):
     assert "scope:full" in ctx
     assert "reply_to:" not in ctx
     assert "hello body" in ctx
+
+
+def test_post_llm_call_truncates_response_before_queue_and_persistence(monkeypatch):
+    captured = {}
+    a2a_plugin._active_a2a_tasks.clear()
+    a2a_plugin._active_a2a_tasks["task-test-001"] = {"text": "inbound", "metadata": {"sender_name": "remote"}}
+
+    monkeypatch.setattr(a2a_plugin.a2a_server, "truncate_response_text", lambda text: str(text)[:4] + "\n[truncated by A2A max_response_chars]")
+    monkeypatch.setattr(a2a_plugin.a2a_server.task_queue, "complete", lambda task_id, response: captured.setdefault("complete", (task_id, response)))
+    monkeypatch.setattr(a2a_plugin, "save_exchange", lambda **kwargs: captured.setdefault("save", kwargs))
+
+    a2a_plugin._on_post_llm_call(assistant_response="abcdef")
+
+    assert captured["complete"][1].startswith("abcd")
+    assert "truncated by A2A max_response_chars" in captured["complete"][1]
+    assert captured["save"]["outbound_text"] == captured["complete"][1]

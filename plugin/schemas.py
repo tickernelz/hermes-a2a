@@ -52,6 +52,15 @@ A2A_CALL = {
                 "type": "string",
                 "description": "Task ID this message is replying to (for multi-turn threading)",
             },
+            "context_id": {
+                "type": "string",
+                "description": "Optional native A2A context ID for correlating related messages",
+            },
+            "parts": {
+                "type": "array",
+                "description": "Optional extra A2A content parts, such as data or safe file/image/audio references",
+                "items": {"type": "object"},
+            },
             "intent": {
                 "type": "string",
                 "enum": ["action_request", "review", "consultation", "notification", "instruction"],

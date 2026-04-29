@@ -27,6 +27,8 @@ a2a:
     max_message_chars: 50000
     max_response_chars: 100000
     max_request_bytes: 1048576
+    max_raw_part_bytes: 262144
+    max_parts: 20
     rate_limit_per_minute: 20
   agents:
     - name: reviewer_agent

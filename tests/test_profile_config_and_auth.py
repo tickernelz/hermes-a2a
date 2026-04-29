@@ -81,7 +81,7 @@ def test_direct_url_uses_configured_agent_auth_token(monkeypatch):
         "_load_configured_agents",
         lambda: [{"name": "local", "url": "http://127.0.0.1:41731", "auth_token": "secret-token"}],
     )
-    monkeypatch.setattr(tools, "get_security_config", lambda: config.SecurityConfig(False, 50_000, 100_000, 1_048_576, 20))
+    monkeypatch.setattr(tools, "get_security_config", lambda: config.SecurityConfig(False, 50_000, 100_000, 1_048_576, 262_144, 20, 20))
 
     def fake_http(method, url, json_body=None, headers=None):
         captured["headers"] = headers or {}
@@ -126,7 +126,7 @@ def test_handle_task_send_reports_failed_task_state(monkeypatch):
     monkeypatch.setattr(server.threading, "Thread", lambda *args, **kwargs: MagicMock(start=lambda: None))
 
     handler = object.__new__(server.A2ARequestHandler)
-    handler.server = MagicMock(max_message_chars=50_000, max_request_bytes=1_048_576)
+    handler.server = MagicMock(max_message_chars=50_000, max_response_chars=100_000, max_request_bytes=1_048_576, max_parts=20, max_raw_part_bytes=262_144)
     handler.client_address = ("127.0.0.1", 12345)
 
     def fail_async(task_id, text, metadata):
@@ -253,3 +253,15 @@ def test_server_agent_card_uses_public_url(monkeypatch):
 
     assert card["url"] == "https://primary.example/a2a"
     assert a2a_server.require_auth is True
+
+
+def test_persistence_truncates_saved_exchange(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(persistence, "get_security_config", lambda: type("Cfg", (), {"max_response_chars": 4})())
+
+    path = persistence.save_exchange("remote", "task-1", "inbound", "abcdef")
+
+    content = path.read_text(encoding="utf-8")
+    assert "abcd" in content
+    assert "abcdef" not in content
+    assert "truncated by A2A max_response_chars" in content

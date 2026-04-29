@@ -192,6 +192,8 @@ a2a:
     max_message_chars: 50000
     max_response_chars: 100000
     max_request_bytes: 1048576
+    max_raw_part_bytes: 262144
+    max_parts: 20
     rate_limit_per_minute: 20
   agents:
     - name: other_agent
@@ -208,6 +210,16 @@ A2A_AUTH_TOKEN=<local-inbound-token>
 A2A_AGENT_OTHER_TOKEN=<remote-inbound-token>
 A2A_WEBHOOK_SECRET=<shared-webhook-secret>
 ```
+
+## Native A2A compatibility
+
+The plugin accepts both legacy JSON-RPC task methods (`tasks/send`, `tasks/get`, `tasks/cancel`) and native A2A JSON-RPC methods (`SendMessage`, `GetTask`, `CancelTask`). It also accepts `message/send` as a compatibility alias for earlier draft clients. Legacy callers keep the legacy result shape. Native-style callers receive a direct A2A Task result with `kind: "task"`, `contextId`, lowercase A2A task states, `status.message.parts`, and `artifacts[].artifactId`.
+
+Outbound calls discover the remote agent card first. Agents that advertise JSON-RPC v0.3+ support receive `SendMessage`/`GetTask` with `kind` parts; older or unknown agents fall back to `tasks/send`/`tasks/get`. Authenticated outbound HTTP blocks redirects so bearer tokens are not forwarded to another origin.
+
+Inbound message parts are normalized into a safe Hermes prompt. Text and JSON/data parts are rendered as text. File, image, audio, video, URL, and raw/blob parts are represented as attachment references with sanitized filename, MIME type, size, checksum, and URL origin. Remote attachment URLs are not fetched automatically; only `http` and `https` references are accepted. Full URLs remain in structured metadata for tools/audit, but only the origin is shown in the model prompt to reduce prompt-injection surface. Inline raw content is never injected into the prompt and is capped by `a2a.security.max_raw_part_bytes`.
+
+This is a compatibility bridge, not unrestricted binary transport or remote tool execution. Use artifact references and explicit Hermes tools (`vision_analyze`, OCR/document tools, STT, etc.) for actual inspection.
 
 ## Usage
 

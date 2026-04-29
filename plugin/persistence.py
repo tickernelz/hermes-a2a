@@ -11,9 +11,24 @@ from pathlib import Path
 from threading import Lock
 
 from .paths import conversation_dir
+from .config import get_security_config
 from .security import filter_outbound
 
 _lock = Lock()
+
+
+def _response_limit() -> int:
+    try:
+        return get_security_config().max_response_chars
+    except Exception:
+        return 100_000
+
+
+def _truncate_text(text: str, max_chars: int | None = None) -> str:
+    limit = max_chars if isinstance(max_chars, int) and max_chars > 0 else _response_limit()
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n[truncated by A2A max_response_chars]"
 
 
 def _atomic_write(path: Path, content: str) -> None:
@@ -41,8 +56,8 @@ def save_exchange(
     directory = conversation_dir() / safe_name
     filepath = directory / f"{today}.md"
 
-    inbound_text = filter_outbound(inbound_text)
-    outbound_text = filter_outbound(outbound_text)
+    inbound_text = _truncate_text(filter_outbound(inbound_text))
+    outbound_text = _truncate_text(filter_outbound(outbound_text))
     intent = (metadata or {}).get("intent", "")
     reply_to = (metadata or {}).get("reply_to_task_id", "")
 
@@ -81,7 +96,7 @@ def update_exchange(
     inbound_text: str,
 ) -> bool:
     """Update the inbound text of an existing exchange (e.g. replace 'waiting' with actual reply)."""
-    inbound_text = filter_outbound(inbound_text)
+    inbound_text = _truncate_text(filter_outbound(inbound_text))
     safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in agent_name.lower())
     now = datetime.now(timezone.utc)
     today = now.strftime("%Y-%m-%d")

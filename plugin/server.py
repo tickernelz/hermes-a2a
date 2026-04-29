@@ -25,6 +25,12 @@ import urllib.request
 import urllib.error
 
 from .config import get_security_config, get_server_config
+from .protocol import (
+    ProtocolError,
+    build_task_result,
+    method_kind,
+    normalize_inbound_message,
+)
 from .security import RateLimiter, audit, filter_outbound, sanitize_inbound
 
 logger = logging.getLogger(__name__)
@@ -156,7 +162,7 @@ class TaskQueue:
             if task:
                 data = {"state": task.state}
                 if task.response is not None:
-                    data["response"] = filter_outbound(task.response)
+                    data["response"] = truncate_response_text(filter_outbound(task.response))
                 return data
         return {"state": "unknown"}
 
@@ -195,6 +201,22 @@ def _is_usable_task_queue(queue) -> bool:
 
 task_queue = _runtime_state()["task_queue"]
 
+
+
+
+def response_limit() -> int:
+    try:
+        return get_security_config().max_response_chars
+    except Exception:
+        return 100_000
+
+
+def truncate_response_text(text: object, max_chars: int | None = None) -> str:
+    raw = text if isinstance(text, str) else str(text)
+    limit = max_chars if isinstance(max_chars, int) and max_chars > 0 else response_limit()
+    if len(raw) <= limit:
+        return raw
+    return raw[:limit] + "\n[truncated by A2A max_response_chars]"
 
 def _get_pending_task(queue, task_id: str):
     getter = getattr(queue, "get_pending", None)
@@ -253,12 +275,8 @@ def _trigger_webhook(task_id: str = ""):
         logger.debug("[A2A] Webhook trigger failed: %s", e)
 
 
-def _task_failed(task_id: str, message: str) -> dict:
-    return {
-        "id": task_id,
-        "status": {"state": "failed"},
-        "artifacts": [{"parts": [{"type": "text", "text": message}], "index": 0}],
-    }
+def _task_failed(task_id: str, message: str, *, native: bool = False, context_id: str = "") -> dict:
+    return build_task_result(task_id, "failed", message, native=native, context_id=context_id)
 
 
 class A2ARequestHandler(BaseHTTPRequestHandler):
@@ -363,19 +381,26 @@ class A2ARequestHandler(BaseHTTPRequestHandler):
             return
 
         audit.log("rpc_request", {"method": method, "client": self.client_address[0]})
+        kind, native = method_kind(method)
 
-        if method == "tasks/send":
-            result = self._handle_task_send(params)
-        elif method == "tasks/get":
-            tid = _safe_id(params.get("id", ""), fallback="")
+        if kind == "send":
+            result = self._handle_task_send(params, native=native)
+        elif kind == "get":
+            raw_tid = params.get("id") or params.get("taskId") or params.get("task_id")
+            if not raw_tid:
+                self._send_json({"jsonrpc": "2.0", "error": {"code": -32602, "message": "Missing task id"}, "id": rpc_id}, 400)
+                return
+            tid = _safe_id(raw_tid, fallback="")
             status = task_queue.get_status(tid)
-            result = {"id": tid, "status": {"state": status["state"]}}
-            if status.get("response"):
-                result["artifacts"] = [{"parts": [{"type": "text", "text": status["response"]}], "index": 0}]
-        elif method == "tasks/cancel":
-            tid = _safe_id(params.get("id", ""), fallback="")
+            result = build_task_result(tid, status["state"], status.get("response", ""), native=native, context_id=tid)
+        elif kind == "cancel":
+            raw_tid = params.get("id") or params.get("taskId") or params.get("task_id")
+            if not raw_tid:
+                self._send_json({"jsonrpc": "2.0", "error": {"code": -32602, "message": "Missing task id"}, "id": rpc_id}, 400)
+                return
+            tid = _safe_id(raw_tid, fallback="")
             task_queue.cancel(tid)
-            result = {"id": tid, "status": {"state": "canceled"}}
+            result = build_task_result(tid, "canceled", "(canceled)", native=native, context_id=tid)
         else:
             self._send_json({
                 "jsonrpc": "2.0",
@@ -386,65 +411,80 @@ class A2ARequestHandler(BaseHTTPRequestHandler):
 
         self._send_json({"jsonrpc": "2.0", "result": result, "id": rpc_id})
 
-    def _handle_task_send(self, params: dict) -> dict:
-        task_id = _safe_id(params.get("id"), fallback=str(uuid.uuid4()))
+    def _task_id_from_params(self, params: dict, message: dict) -> str:
+        return _safe_id(
+            message.get("taskId")
+            or message.get("task_id")
+            or params.get("id")
+            or params.get("taskId")
+            or params.get("task_id")
+            or message.get("messageId")
+            or message.get("message_id"),
+            fallback=str(uuid.uuid4()),
+        )
+
+    def _handle_task_send(self, params: dict, *, native: bool = False) -> dict:
         message = params.get("message", {})
         if not isinstance(message, dict):
-            return _task_failed(task_id, "Invalid message")
+            task_id = _safe_id(params.get("id") or params.get("taskId") or params.get("task_id"), fallback=str(uuid.uuid4()))
+            return _task_failed(task_id, "Invalid message", native=native)
 
-        parts = message.get("parts", [])
-        if not isinstance(parts, list):
-            return _task_failed(task_id, "Invalid message parts")
+        task_id = self._task_id_from_params(params, message)
+        context_id = _safe_id(message.get("contextId") or message.get("context_id") or params.get("contextId") or params.get("context_id"), fallback="", max_length=96)
 
-        text_parts = []
-        for part in parts:
-            if isinstance(part, dict) and part.get("type") == "text":
-                text_parts.append(str(part.get("text", "")))
-        user_text = "\n".join(text_parts)
+        try:
+            normalized = normalize_inbound_message(
+                message,
+                max_message_chars=self.server.max_message_chars,
+                max_parts=self.server.max_parts,
+                max_raw_part_bytes=self.server.max_raw_part_bytes,
+            )
+        except ProtocolError as exc:
+            return _task_failed(task_id, str(exc), native=native, context_id=context_id)
 
-        if not user_text.strip():
-            return _task_failed(task_id, "Empty message")
-
-        user_text = sanitize_inbound(user_text, max_length=self.server.max_message_chars)
+        user_text = sanitize_inbound(normalized.prompt_text, max_length=self.server.max_message_chars)
         metadata = message.get("metadata", {})
         if not isinstance(metadata, dict):
             metadata = {}
+        metadata = dict(metadata)
+        metadata.update(normalized.metadata)
+        if context_id:
+            metadata["context_id"] = context_id
+        message_id = message.get("messageId") or message.get("message_id")
+        if message_id:
+            metadata["message_id"] = _safe_id(message_id, fallback="", max_length=96)
         if "sender_name" not in metadata:
             from_field = params.get("from") or (params.get("sender") if isinstance(params.get("sender"), dict) else {}).get("name")
             metadata["sender_name"] = from_field or metadata.get("agent_name", f"agent-{self.client_address[0]}")
         raw_name = str(metadata.get("sender_name") or "")
         metadata["sender_name"] = "".join(c for c in raw_name if c.isalnum() or c in "-_.@ ")[:64] or "remote"
-        metadata["reply_to_task_id"] = _safe_id(metadata.get("reply_to_task_id", ""), fallback="", max_length=64) if metadata.get("reply_to_task_id") else ""
+        metadata["reply_to_task_id"] = _safe_id(
+            metadata.get("reply_to_task_id") or message.get("replyToTaskId") or message.get("reply_to_task_id") or params.get("reply_to_task_id") or "",
+            fallback="",
+            max_length=64,
+        ) if (metadata.get("reply_to_task_id") or message.get("replyToTaskId") or message.get("reply_to_task_id") or params.get("reply_to_task_id")) else ""
 
-        audit.log("task_received", {"task_id": task_id, "length": len(user_text)})
+        audit.log("task_received", {"task_id": task_id, "length": len(user_text), "parts": len(normalized.safe_parts)})
 
         if task_queue.pending_count() >= _MAX_PENDING:
-            return _task_failed(task_id, "Agent busy — too many pending tasks")
+            return _task_failed(task_id, "Agent busy — too many pending tasks", native=native, context_id=context_id)
 
         task = task_queue.enqueue(task_id, user_text, metadata)
         if task is None:
-            return _task_failed(task_id, "Task ID already in use")
+            return _task_failed(task_id, "Task ID already in use", native=native, context_id=context_id)
 
         threading.Thread(target=_trigger_webhook, args=(task_id,), daemon=True).start()
 
         task.ready.wait(timeout=_RESPONSE_TIMEOUT)
 
         if task.response is None:
-            return {
-                "id": task_id,
-                "status": {"state": "working"},
-                "artifacts": [{"parts": [{"type": "text", "text": "(processing — poll with tasks/get)"}], "index": 0}],
-            }
+            return build_task_result(task_id, "working", "(processing — poll with tasks/get)", native=native, context_id=context_id)
 
-        filtered = filter_outbound(task.response)
+        filtered = truncate_response_text(filter_outbound(task.response), self.server.max_response_chars)
         audit.log("task_completed", {"task_id": task_id, "response_length": len(filtered)})
 
         state = task.state if task.state in {"completed", "failed", "canceled"} else "completed"
-        return {
-            "id": task_id,
-            "status": {"state": state},
-            "artifacts": [{"parts": [{"type": "text", "text": filtered}], "index": 0}],
-        }
+        return build_task_result(task_id, state, filtered, native=native, context_id=context_id)
 
 
 class A2AServer(ThreadingHTTPServer):
@@ -465,7 +505,10 @@ class A2AServer(ThreadingHTTPServer):
         self.require_auth = server_cfg.require_auth
         self.public_url = server_cfg.public_url
         self.max_message_chars = security_cfg.max_message_chars
+        self.max_response_chars = security_cfg.max_response_chars
         self.max_request_bytes = security_cfg.max_request_bytes
+        self.max_raw_part_bytes = security_cfg.max_raw_part_bytes
+        self.max_parts = security_cfg.max_parts
         self.limiter = RateLimiter(max_requests=security_cfg.rate_limit_per_minute)
         if self.require_auth and not self.auth_token:
             logger.warning("[A2A] A2A_REQUIRE_AUTH is enabled but A2A_AUTH_TOKEN is missing; POST requests will be rejected")
@@ -482,20 +525,54 @@ class A2AServer(ThreadingHTTPServer):
             "url": public_url,
             "version": HERMES_VERSION,
             "protocol": "a2a",
-            "protocolVersion": "0.2.0",
+            "protocolVersion": "0.3.0",
+            "preferredTransport": "JSONRPC",
+            "supportedInterfaces": [
+                {
+                    "url": public_url,
+                    "protocolBinding": "JSONRPC",
+                    "protocolVersion": "0.3.0",
+                }
+            ],
+            "additionalInterfaces": [
+                {
+                    "url": public_url,
+                    "transport": "JSONRPC",
+                }
+            ],
+            "defaultInputModes": ["text/plain", "application/json"],
+            "defaultOutputModes": ["text/plain", "application/json"],
             "capabilities": {
                 "streaming": False,
                 "pushNotifications": False,
                 "multiTurn": False,
+                "stateTransitionHistory": False,
                 "structuredMetadata": True,
+                "extensions": [
+                    {
+                        "uri": "https://github.com/tickernelz/hermes-a2a/extensions/multimodal-reference/v1",
+                        "description": "Accepts non-text parts as safe prompt references; remote URLs are not fetched automatically.",
+                        "required": False,
+                    }
+                ],
             },
             "skills": [
                 {
                     "id": "general",
                     "name": "General Assistant",
                     "description": "General-purpose AI assistant with tool use, web search, and more",
+                    "tags": ["assistant", "hermes", "tools"],
+                    "inputModes": ["text/plain", "application/json"],
+                    "outputModes": ["text/plain", "application/json"],
                 }
             ],
+            "securitySchemes": {
+                "bearerAuth": {
+                    "type": "http",
+                    "scheme": "bearer",
+                }
+            } if self.auth_token else {},
+            "security": [{"bearerAuth": []}] if self.auth_token else [],
             "authentication": {
                 "schemes": ["bearer"] if self.auth_token else [],
             },

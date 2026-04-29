@@ -349,6 +349,8 @@ def _on_post_llm_call(assistant_response=None, **kwargs):
         )
 
     task_id, info = next(iter(snapshot.items()))
+    response_text = a2a_server.truncate_response_text(response_text)
+
     if complete_as_failure:
         a2a_server.task_queue.fail(task_id, response_text)
     else:

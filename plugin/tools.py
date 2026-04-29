@@ -8,8 +8,12 @@ import time
 import uuid
 from collections import deque
 from typing import Any, Dict, List
+import urllib.error
+import urllib.request
 
 from .config import get_security_config, load_agents, validate_url
+from .protocol import extract_response_text, extract_task_id, extract_task_state, normalize_state
+from .security import filter_outbound, sanitize_inbound
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +96,11 @@ def _err(msg: str) -> str:
     return json.dumps({"error": msg}, ensure_ascii=False)
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(req.full_url, code, "Redirect blocked", headers, fp)
+
+
 def _http_request(method: str, url: str, json_body: dict = None, headers: dict = None) -> dict:
     """Synchronous HTTP request using urllib (no async dependency)."""
     import urllib.request
@@ -104,8 +113,9 @@ def _http_request(method: str, url: str, json_body: dict = None, headers: dict =
     data = json.dumps(json_body).encode() if json_body else None
     req = urllib.request.Request(url, data=data, headers=req_headers, method=method)
 
+    opener = urllib.request.build_opener(_NoRedirectHandler)
     try:
-        with urllib.request.urlopen(req, timeout=_DEFAULT_TIMEOUT) as resp:
+        with opener.open(req, timeout=_DEFAULT_TIMEOUT) as resp:
             data = resp.read(_MAX_RESPONSE_SIZE + 1)
             if len(data) > _MAX_RESPONSE_SIZE:
                 raise RuntimeError(f"Response exceeds {_MAX_RESPONSE_SIZE} bytes")
@@ -116,6 +126,162 @@ def _http_request(method: str, url: str, json_body: dict = None, headers: dict =
         if isinstance(e.reason, (TimeoutError, OSError)) and "timed out" in str(e.reason):
             raise TimeoutError(f"Timed out after {_DEFAULT_TIMEOUT}s") from e
         raise ConnectionError(f"Cannot connect: {e.reason}") from e
+
+
+
+def _parse_rpc_task_response(response: dict, fallback_task_id: str) -> dict[str, str]:
+    rpc_result = response.get("result", {}) if isinstance(response, dict) else {}
+    task_id = extract_task_id(rpc_result, fallback_task_id)
+    state = extract_task_state(rpc_result)
+    if state == "unknown" and isinstance(rpc_result, dict) and "message" in rpc_result:
+        state = "completed"
+    text = sanitize_inbound(extract_response_text(rpc_result).strip())
+    return {"task_id": task_id or fallback_task_id, "state": state, "text": text}
+
+
+def _version_tuple(value: Any) -> tuple[int, ...]:
+    parts = []
+    for raw in str(value or "").split("."):
+        digits = "".join(ch for ch in raw if ch.isdigit())
+        parts.append(int(digits or 0))
+    return tuple(parts or [0])
+
+
+def _as_list(value: Any) -> list:
+    return value if isinstance(value, list) else []
+
+
+def _is_native_card(card: dict | None) -> bool:
+    if not isinstance(card, dict):
+        return False
+    transport = str(card.get("preferredTransport") or "").upper()
+    protocol_version = card.get("protocolVersion")
+    if transport == "JSONRPC" and _version_tuple(protocol_version) >= (0, 3):
+        return True
+    for iface in _as_list(card.get("additionalInterfaces")) + _as_list(card.get("supportedInterfaces")):
+        if not isinstance(iface, dict):
+            continue
+        binding = str(iface.get("transport") or iface.get("protocolBinding") or "").upper()
+        iface_version = iface.get("protocolVersion") or protocol_version
+        if binding == "JSONRPC" and _version_tuple(iface_version) >= (0, 3):
+            return True
+    return False
+
+
+def _sanitize_part_value(value: Any, max_raw_part_bytes: int, *, depth: int = 0, key: str = "") -> Any:
+    if depth > 8:
+        return "[truncated by A2A part depth limit]"
+    if isinstance(value, str):
+        filtered = filter_outbound(value)
+        if key in {"url", "uri"}:
+            return filtered[:4096]
+        if len(filtered) > max_raw_part_bytes:
+            return filtered[:max_raw_part_bytes] + "\n[truncated by A2A max_raw_part_bytes]"
+        return filtered
+    if isinstance(value, dict):
+        sanitized = {}
+        for index, (child_key, child) in enumerate(value.items()):
+            if index >= 64:
+                sanitized["_truncated"] = "too many object keys"
+                break
+            safe_key = str(child_key)[:80]
+            sanitized[safe_key] = _sanitize_part_value(child, max_raw_part_bytes, depth=depth + 1, key=safe_key)
+        return sanitized
+    if isinstance(value, list):
+        return [_sanitize_part_value(v, max_raw_part_bytes, depth=depth + 1, key=key) for v in value[:64]]
+    return value
+
+
+def _payload_size(value: Any) -> int:
+    return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode())
+
+
+def _is_safe_reference_url(value: Any) -> bool:
+    from urllib.parse import urlparse
+
+    try:
+        parsed = urlparse(str(value or ""))
+    except ValueError:
+        return False
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def _validate_reference_urls(value: Any, path: str = "part") -> None:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            child_path = f"{path}.{key}"
+            if key in {"url", "uri"} and child:
+                if not _is_safe_reference_url(child):
+                    raise ValueError(f"Unsupported outbound attachment URL scheme in {child_path}")
+            else:
+                _validate_reference_urls(child, child_path)
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            _validate_reference_urls(child, f"{path}[{index}]")
+
+
+def _truncate_raw_fields(value: Any, max_raw_part_bytes: int) -> Any:
+    if isinstance(value, dict):
+        output = {}
+        for key, child in value.items():
+            if key in {"raw", "bytes"}:
+                raw = str(child or "")
+                output[key] = raw[:max_raw_part_bytes] + ("\n[truncated by A2A max_raw_part_bytes]" if len(raw) > max_raw_part_bytes else "")
+            else:
+                output[key] = _truncate_raw_fields(child, max_raw_part_bytes)
+        return output
+    if isinstance(value, list):
+        return [_truncate_raw_fields(child, max_raw_part_bytes) for child in value]
+    return value
+
+
+def _sanitize_outbound_part(part: dict, max_raw_part_bytes: int) -> dict:
+    safe = _sanitize_part_value(part, max_raw_part_bytes)
+    if not isinstance(safe, dict):
+        return {}
+    _validate_reference_urls(safe)
+    return _truncate_raw_fields(safe, max_raw_part_bytes)
+
+
+def _native_part(part: dict) -> dict:
+    converted = dict(part)
+    if "type" in converted and "kind" not in converted:
+        converted["kind"] = converted.pop("type")
+    if "kind" not in converted:
+        converted["kind"] = "text" if "text" in converted else "data"
+    return converted
+
+
+def _build_message_parts(message: str, extra_parts: list | None = None, *, native: bool = False) -> list[dict]:
+    security = get_security_config()
+    base = {"text": message}
+    base["kind" if native else "type"] = "text"
+    parts = [base]
+    if isinstance(extra_parts, list):
+        if len(extra_parts) + 1 > security.max_parts:
+            raise ValueError(f"Too many outbound message parts: max {security.max_parts}")
+        for part in extra_parts:
+            if not isinstance(part, dict):
+                continue
+            safe_part = _sanitize_outbound_part(part, security.max_raw_part_bytes)
+            if not safe_part:
+                continue
+            parts.append(_native_part(safe_part) if native else safe_part)
+    if _payload_size(parts) > security.max_request_bytes:
+        raise ValueError(f"Outbound message parts exceed max_request_bytes ({security.max_request_bytes})")
+    return parts
+
+
+def _discover_card(url: str, headers: dict) -> dict | None:
+    try:
+        return _http_request("GET", f"{url.rstrip('/')}/.well-known/agent.json", headers=headers)
+    except Exception as exc:
+        logger.debug("A2A card discovery skipped: %s", exc)
+        return None
+
+
+def _terminal_state(state: str) -> bool:
+    return normalize_state(state) in {"completed", "failed", "canceled", "rejected", "input-required", "auth-required"}
 
 
 def handle_discover(args: dict, **kwargs) -> str:
@@ -159,7 +325,7 @@ def handle_discover(args: dict, **kwargs) -> str:
 
 
 def handle_call(args: dict, **kwargs) -> str:
-    from .security import audit, filter_outbound, sanitize_inbound
+    from .security import audit
 
     url = args.get("url", "")
     name = args.get("name", "")
@@ -181,32 +347,45 @@ def handle_call(args: dict, **kwargs) -> str:
         url, auth_token = _resolve_target(name, url)
     except ValueError as e:
         return _err(str(e))
+    headers = {}
+    if auth_token:
+        headers["Authorization"] = f"Bearer {auth_token}"
+
+    card = _discover_card(url, headers)
+    native = _is_native_card(card)
+
     # filter_outbound: strip sensitive data from what we send out
     filtered_message = filter_outbound(message)
+    try:
+        parts = _build_message_parts(filtered_message, args.get("parts"), native=native)
+    except ValueError as exc:
+        return _err(str(exc))
+
+    message_body = {
+        "role": "user",
+        "parts": parts,
+        "metadata": {
+            "intent": intent,
+            "expected_action": expected_action,
+            "context_scope": "full",
+            "reply_to_task_id": reply_to_task_id,
+            "sender_name": os.getenv("A2A_AGENT_NAME", "hermes-agent"),
+        },
+    }
+    if native:
+        message_body["kind"] = "message"
+        message_body["messageId"] = task_id
+        message_body["contextId"] = args.get("context_id") or task_id
 
     payload = {
         "jsonrpc": "2.0",
         "id": str(uuid.uuid4()),
-        "method": "tasks/send",
+        "method": "SendMessage" if native else "tasks/send",
         "params": {
             "id": task_id,
-            "message": {
-                "role": "user",
-                "parts": [{"type": "text", "text": filtered_message}],
-                "metadata": {
-                    "intent": intent,
-                    "expected_action": expected_action,
-                    "context_scope": "full",
-                    "reply_to_task_id": reply_to_task_id,
-                    "sender_name": os.getenv("A2A_AGENT_NAME", "hermes-agent"),
-                },
-            },
+            "message": message_body,
         },
     }
-
-    headers = {}
-    if auth_token:
-        headers["Authorization"] = f"Bearer {auth_token}"
 
     audit.log("call_outbound", {"target": url, "task_id": task_id, "length": len(message)})
 
@@ -243,36 +422,32 @@ def handle_call(args: dict, **kwargs) -> str:
             err_msg = rpc_error.get("message", str(rpc_error)) if isinstance(rpc_error, dict) else str(rpc_error)
             error_msg = f"Remote agent error: {err_msg}"
         else:
-            rpc_result = result.get("result", {})
-            task_state = rpc_result.get("status", {}).get("state", "unknown")
-            remote_task_id = rpc_result.get("id", task_id)
+            parsed = _parse_rpc_task_response(result, task_id)
+            task_state = parsed["state"]
+            remote_task_id = parsed["task_id"]
+            response_text = parsed["text"]
 
             # If agent returned "working", poll tasks/get until completed
-            if task_state == "working" and remote_task_id:
+            if task_state in {"working", "submitted"} and remote_task_id:
                 poll_payload = {
                     "jsonrpc": "2.0",
                     "id": str(uuid.uuid4()),
-                    "method": "tasks/get",
+                    "method": "GetTask" if native else "tasks/get",
                     "params": {"id": remote_task_id},
                 }
                 for attempt in range(_POLL_MAX_ATTEMPTS):
                     time.sleep(_POLL_INTERVAL)
                     try:
                         poll_result = _http_request("POST", url.rstrip("/"), json_body=poll_payload, headers=headers)
-                        poll_inner = poll_result.get("result", {})
-                        poll_state = poll_inner.get("status", {}).get("state", "")
-                        if poll_state in ("completed", "failed", "canceled"):
-                            rpc_result = poll_inner
+                        parsed = _parse_rpc_task_response(poll_result, remote_task_id)
+                        poll_state = parsed["state"]
+                        if _terminal_state(poll_state):
+                            remote_task_id = parsed["task_id"]
                             task_state = poll_state
+                            response_text = parsed["text"]
                             break
                     except Exception:
                         continue
-
-            for artifact in rpc_result.get("artifacts", []):
-                for part in artifact.get("parts", []):
-                    if part.get("type") == "text":
-                        response_text += part.get("text", "") + "\n"
-            response_text = sanitize_inbound(response_text.strip())
 
     audit.log("call_inbound", {"source": url, "task_state": task_state, "task_id": task_id, "error": error_msg or None})
 
@@ -293,7 +468,7 @@ def handle_call(args: dict, **kwargs) -> str:
         return _err(error_msg)
 
     return _ok({
-        "task_id": rpc_result.get("id", task_id),
+        "task_id": remote_task_id or task_id,
         "state": task_state,
         "response": response_text or "(no text response)",
         "source": url,

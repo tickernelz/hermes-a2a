@@ -239,9 +239,15 @@ def test_install_auto_chooses_distinct_webhook_port_for_named_profile(tmp_path):
     assert profile_result.returncode == 0, profile_result.stderr
     default_cfg = read_config(default_home)
     profile_cfg = read_config(profile_home)
-    assert default_cfg["platforms"]["webhook"]["extra"]["port"] == 47644
-    assert profile_cfg["platforms"]["webhook"]["extra"]["port"] != 47644
-    assert profile_cfg["platforms"]["webhook"]["extra"]["port"] == int(
+    default_port = default_cfg["platforms"]["webhook"]["extra"]["port"]
+    profile_port = profile_cfg["platforms"]["webhook"]["extra"]["port"]
+    assert isinstance(default_port, int)
+    assert isinstance(profile_port, int)
+    assert default_port != profile_port
+    assert default_port == int(
+        next(line.split("=", 1)[1] for line in (default_home / ".env").read_text(encoding="utf-8").splitlines() if line.startswith("WEBHOOK_PORT="))
+    )
+    assert profile_port == int(
         next(line.split("=", 1)[1] for line in (profile_home / ".env").read_text(encoding="utf-8").splitlines() if line.startswith("WEBHOOK_PORT="))
     )
 

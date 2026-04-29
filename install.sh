@@ -435,6 +435,8 @@ security.setdefault("redact_outbound", True)
 security.setdefault("max_message_chars", 50000)
 security.setdefault("max_response_chars", 100000)
 security.setdefault("max_request_bytes", 1048576)
+security.setdefault("max_raw_part_bytes", 262144)
+security.setdefault("max_parts", 20)
 security.setdefault("rate_limit_per_minute", 20)
 
 remote_name = os.environ.get("A2A_REMOTE_NAME", "").strip()
