@@ -67,9 +67,13 @@ _resolve_hermes_home() {
     echo "No Hermes profiles found. Use --hermes-home PATH or set HERMES_HOME." >&2
     exit 1
   fi
-  if [ "${#profiles[@]}" -eq 1 ] || [ ! -t 0 ]; then
+  if [ "${#profiles[@]}" -eq 1 ]; then
     printf '%s\n' "${profiles[0]#*:}"
     return
+  fi
+  if [ ! -t 0 ]; then
+    echo "Refusing to choose automatically: multiple Hermes profiles found in non-interactive mode. Use --profile NAME or --hermes-home PATH." >&2
+    return 1
   fi
 
   echo "Select target Hermes profile:" >&2
@@ -135,7 +139,14 @@ _pick_python() {
 
 PYTHON="$(_pick_python)"
 
-export HERMES_HOME CONFIG_FILE ENV_FILE PLUGIN_DIR SOURCE_DIR DASHBOARD_DIR DRY_RUN
+A2A_EXPLICIT_KEYS=""
+for key in A2A_PORT A2A_HOST A2A_PUBLIC_URL A2A_AGENT_NAME A2A_AGENT_DESCRIPTION A2A_REQUIRE_AUTH; do
+  if [ "${!key+x}" = "x" ] && [ -n "${!key}" ]; then
+    A2A_EXPLICIT_KEYS="${A2A_EXPLICIT_KEYS:+$A2A_EXPLICIT_KEYS,}$key"
+  fi
+done
+
+export HERMES_HOME CONFIG_FILE ENV_FILE PLUGIN_DIR SOURCE_DIR DASHBOARD_DIR DRY_RUN A2A_EXPLICIT_KEYS
 export A2A_PORT="${A2A_PORT:-41731}"
 export A2A_HOST="${A2A_HOST:-127.0.0.1}"
 export A2A_PUBLIC_URL="${A2A_PUBLIC_URL:-http://${A2A_HOST}:${A2A_PORT}}"
@@ -177,6 +188,7 @@ plugin_dir = Path(os.environ["PLUGIN_DIR"]).expanduser().resolve()
 source_dir = Path(os.environ["SOURCE_DIR"]).expanduser().resolve()
 dashboard_dir = Path(os.environ["DASHBOARD_DIR"]).expanduser().resolve()
 dry_run = os.environ.get("DRY_RUN", "false").lower() == "true"
+explicit_keys = {key for key in os.environ.get("A2A_EXPLICIT_KEYS", "").split(",") if key}
 
 if dry_run:
     print("DRY RUN: no files will be modified")
@@ -253,13 +265,40 @@ def bool_env(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def ensure_env(lines: list[str], key: str, value: str) -> None:
+def env_has_key(lines: list[str], key: str) -> bool:
+    prefix = f"{key}="
+    return any(line.startswith(prefix) for line in lines)
+
+
+def ensure_env(lines: list[str], key: str, value: str, *, overwrite: bool = False) -> None:
     prefix = f"{key}="
     for index, line in enumerate(lines):
         if line.startswith(prefix):
-            lines[index] = f"{key}={value}"
+            if overwrite:
+                lines[index] = f"{key}={value}"
             return
     lines.append(f"{key}={value}")
+
+
+def env_or_config(lines: list[str], key: str, current, default: str) -> str:
+    env_value = os.environ.get(key)
+    if key in explicit_keys and env_value not in (None, ""):
+        return str(env_value)
+    prefix = f"{key}="
+    for line in lines:
+        if line.startswith(prefix):
+            return line.split("=", 1)[1]
+    if current not in (None, ""):
+        return str(current)
+    return default
+
+
+def bool_value(value, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None or value == "":
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 
@@ -318,6 +357,16 @@ else:
 
 cfg = load_config()
 existing_env = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
+existing_a2a = cfg.get("a2a", {}) if isinstance(cfg.get("a2a"), dict) else {}
+existing_server = existing_a2a.get("server", {}) if isinstance(existing_a2a.get("server"), dict) else {}
+
+a2a_host = env_or_config(existing_env, "A2A_HOST", existing_server.get("host"), os.environ["A2A_HOST"])
+a2a_port = env_or_config(existing_env, "A2A_PORT", existing_server.get("port"), os.environ["A2A_PORT"])
+a2a_public_url = env_or_config(existing_env, "A2A_PUBLIC_URL", existing_server.get("public_url"), f"http://{a2a_host}:{a2a_port}").rstrip("/")
+a2a_agent_name = env_or_config(existing_env, "A2A_AGENT_NAME", None, os.environ["A2A_AGENT_NAME"])
+a2a_agent_description = env_or_config(existing_env, "A2A_AGENT_DESCRIPTION", None, os.environ["A2A_AGENT_DESCRIPTION"])
+a2a_require_auth = env_or_config(existing_env, "A2A_REQUIRE_AUTH", existing_server.get("require_auth"), os.environ["A2A_REQUIRE_AUTH"])
+
 webhook_port = choose_webhook_port(home, cfg, existing_env)
 os.environ["WEBHOOK_PORT"] = str(webhook_port)
 
@@ -328,12 +377,12 @@ remote_token = env_value(existing_env, remote_token_env, lambda: secrets.token_h
 
 env_lines = list(existing_env)
 ensure_env(env_lines, "A2A_ENABLED", "true")
-ensure_env(env_lines, "A2A_HOST", os.environ["A2A_HOST"])
-ensure_env(env_lines, "A2A_PORT", os.environ["A2A_PORT"])
-ensure_env(env_lines, "A2A_PUBLIC_URL", os.environ["A2A_PUBLIC_URL"].rstrip("/"))
-ensure_env(env_lines, "A2A_AGENT_NAME", os.environ["A2A_AGENT_NAME"])
-ensure_env(env_lines, "A2A_AGENT_DESCRIPTION", os.environ["A2A_AGENT_DESCRIPTION"])
-ensure_env(env_lines, "A2A_REQUIRE_AUTH", os.environ["A2A_REQUIRE_AUTH"])
+ensure_env(env_lines, "A2A_HOST", a2a_host, overwrite="A2A_HOST" in explicit_keys)
+ensure_env(env_lines, "A2A_PORT", a2a_port, overwrite="A2A_PORT" in explicit_keys)
+ensure_env(env_lines, "A2A_PUBLIC_URL", a2a_public_url, overwrite="A2A_PUBLIC_URL" in explicit_keys)
+ensure_env(env_lines, "A2A_AGENT_NAME", a2a_agent_name, overwrite="A2A_AGENT_NAME" in explicit_keys)
+ensure_env(env_lines, "A2A_AGENT_DESCRIPTION", a2a_agent_description, overwrite="A2A_AGENT_DESCRIPTION" in explicit_keys)
+ensure_env(env_lines, "A2A_REQUIRE_AUTH", a2a_require_auth, overwrite="A2A_REQUIRE_AUTH" in explicit_keys)
 ensure_env(env_lines, "A2A_AUTH_TOKEN", auth_token)
 ensure_env(env_lines, "A2A_WEBHOOK_SECRET", secret)
 ensure_env(env_lines, "WEBHOOK_ENABLED", "true")
@@ -393,6 +442,7 @@ if platform and chat_id:
         "user_name": os.environ.get("A2A_HOME_USER_NAME", "").strip() or "user",
     }
 routes["a2a_trigger"] = route
+routes["a2a_dashboard"] = {"secret": secret, "prompt": "[A2A dashboard]"}
 
 platforms = cfg.setdefault("platforms", {})
 if not isinstance(platforms, dict):
@@ -413,6 +463,7 @@ if not isinstance(platform_routes, dict):
     platform_routes = {}
     platform_webhook_extra["routes"] = platform_routes
 platform_routes["a2a_trigger"] = dict(route)
+platform_routes["a2a_dashboard"] = {"secret": secret, "prompt": "[A2A dashboard]"}
 
 a2a = cfg.setdefault("a2a", {})
 if not isinstance(a2a, dict):
@@ -421,10 +472,10 @@ if not isinstance(a2a, dict):
 a2a["enabled"] = True
 a2a["server"] = {
     **(a2a.get("server") if isinstance(a2a.get("server"), dict) else {}),
-    "host": os.environ["A2A_HOST"],
-    "port": int(os.environ["A2A_PORT"]),
-    "public_url": os.environ["A2A_PUBLIC_URL"].rstrip("/"),
-    "require_auth": bool_env("A2A_REQUIRE_AUTH", True),
+    "host": a2a_host,
+    "port": int(a2a_port),
+    "public_url": a2a_public_url,
+    "require_auth": bool_value(a2a_require_auth, True),
 }
 security = a2a.setdefault("security", {})
 if not isinstance(security, dict):

@@ -64,9 +64,13 @@ _resolve_hermes_home() {
     echo "No Hermes profiles found. Use --hermes-home PATH or set HERMES_HOME." >&2
     exit 1
   fi
-  if [ "${#profiles[@]}" -eq 1 ] || [ ! -t 0 ]; then
+  if [ "${#profiles[@]}" -eq 1 ]; then
     printf '%s\n' "${profiles[0]#*:}"
     return
+  fi
+  if [ ! -t 0 ]; then
+    echo "Refusing to choose automatically: multiple Hermes profiles found in non-interactive mode. Use --profile NAME or --hermes-home PATH." >&2
+    return 1
   fi
 
   echo "Select target Hermes profile:" >&2

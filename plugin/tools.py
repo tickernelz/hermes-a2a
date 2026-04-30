@@ -1,14 +1,17 @@
 """A2A client tool handlers — outbound calls to remote agents."""
 
+import ipaddress
 import json
 import logging
 import os
 import secrets
+import socket
 import threading
 import time
 import uuid
 from collections import deque
 from typing import Any, Dict, List
+from urllib.parse import urlparse
 import urllib.error
 import urllib.request
 
@@ -48,8 +51,25 @@ def _normalize_url(url: str) -> str:
     return (url or "").strip().rstrip("/")
 
 
-def _validate_target_url(url: str) -> str:
-    return validate_url(url)
+def _host_is_private_or_link_local(hostname: str) -> bool:
+    try:
+        addresses = socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
+    except socket.gaierror:
+        return False
+    for address in addresses:
+        ip = ipaddress.ip_address(address[4][0])
+        if ip.is_private or ip.is_link_local or ip.is_loopback:
+            return True
+    return False
+
+
+def _validate_target_url(url: str, *, allow_private: bool = False) -> str:
+    normalized = validate_url(url)
+    parsed = urlparse(normalized)
+    hostname = parsed.hostname or ""
+    if not allow_private and _host_is_private_or_link_local(hostname):
+        raise ValueError("A2A URL resolves to a private or link-local address; configure the agent explicitly to trust local/private targets")
+    return normalized
 
 
 def _agent_by_name(name: str) -> dict[str, Any] | None:
@@ -74,12 +94,12 @@ def _resolve_target(name: str, url: str) -> tuple[str, str]:
         agent = _agent_by_name(name)
         if not agent:
             raise ValueError(f"Agent '{name}' not found in active Hermes profile config")
-        return _validate_target_url(agent.get("url", "")), agent.get("auth_token", "")
+        return _validate_target_url(agent.get("url", ""), allow_private=True), agent.get("auth_token", "")
 
-    url = _validate_target_url(url)
+    url = validate_url(url)
     agent = _agent_by_url(url)
     if agent:
-        return url, agent.get("auth_token", "")
+        return _validate_target_url(url, allow_private=True), agent.get("auth_token", "")
 
     if not get_security_config().allow_unconfigured_urls:
         raise ValueError(
@@ -87,7 +107,7 @@ def _resolve_target(name: str, url: str) -> tuple[str, str]:
             "or set a2a.security.allow_unconfigured_urls=true / A2A_ALLOW_UNCONFIGURED_URLS=true"
         )
 
-    return url, ""
+    return _validate_target_url(url, allow_private=False), ""
 
 
 def _ok(data: dict) -> str:

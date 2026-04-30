@@ -7,6 +7,7 @@ No gateway patch needed — drop into ~/.hermes/plugins/a2a/ and restart.
 import logging
 import os
 import threading
+import time
 
 from .schemas import A2A_DISCOVER, A2A_CALL, A2A_LIST, A2A_GET, A2A_CANCEL
 from .tools import handle_discover, handle_call, handle_get, handle_cancel, handle_list
@@ -20,8 +21,9 @@ logger = logging.getLogger(__name__)
 
 _server = None
 _server_thread: threading.Thread | None = None
-_active_a2a_tasks: dict[str, dict] = {}  # task_id → {text, metadata}
+_active_a2a_tasks: dict[str, dict] = {}
 _active_tasks_lock = threading.Lock()
+_ACTIVE_TASK_TIMEOUT = 300
 
 
 def _validate_config():
@@ -241,14 +243,32 @@ def _format_task_context(task, *, include_privacy_note: bool = True) -> str:
     return prefix + header + "\n" + task.text
 
 
+def _expire_stale_active_tasks(now: float | None = None) -> None:
+    current = time.time() if now is None else now
+    expired: list[str] = []
+    with _active_tasks_lock:
+        for task_id, info in list(_active_a2a_tasks.items()):
+            activated_at = float(info.get("activated_at") or current)
+            if current - activated_at > _ACTIVE_TASK_TIMEOUT:
+                expired.append(task_id)
+                _active_a2a_tasks.pop(task_id, None)
+    for task_id in expired:
+        try:
+            a2a_server.task_queue.fail(task_id, "(expired active A2A task)")
+        except Exception:
+            logger.debug("[A2A] Failed to expire stale active task %s", task_id, exc_info=True)
+
+
 def _activate_task_if_idle(task) -> bool:
     """Bind one A2A task to the current turn if no task is already active."""
+    _expire_stale_active_tasks()
     with _active_tasks_lock:
         if _active_a2a_tasks:
             return False
         _active_a2a_tasks[task.task_id] = {
             "text": task.text,
             "metadata": task.metadata,
+            "activated_at": time.time(),
         }
         return True
 
@@ -270,6 +290,7 @@ def _on_pre_gateway_dispatch(event=None, **kwargs):
     if event is None or getattr(event, "text", None) != "[A2A trigger]":
         return None
 
+    _expire_stale_active_tasks()
     with _active_tasks_lock:
         if _active_a2a_tasks:
             return {"action": "skip", "reason": "A2A task already active"}
@@ -302,6 +323,7 @@ def _on_pre_llm_call(conversation_history=None, user_message=None, **kwargs):
     Only one task per turn so the response maps 1:1 to the task.
     If the agent is mid-conversation (user sent a real message), hold the queue.
     """
+    _expire_stale_active_tasks()
     with _active_tasks_lock:
         if _active_a2a_tasks:
             logger.debug("[A2A] Active task in progress, holding pending tasks")

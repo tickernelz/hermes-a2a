@@ -65,9 +65,9 @@ def _safe_id(value: object, *, fallback: str | None = None, max_length: int = 96
 
 
 class _PendingTask:
-    __slots__ = ("task_id", "text", "metadata", "response", "ready", "created_at", "state")
+    __slots__ = ("task_id", "text", "metadata", "response", "ready", "created_at", "state", "owner")
 
-    def __init__(self, task_id: str, text: str, metadata: dict):
+    def __init__(self, task_id: str, text: str, metadata: dict, owner: str = ""):
         self.task_id = task_id
         self.text = text
         self.metadata = metadata
@@ -75,6 +75,7 @@ class _PendingTask:
         self.ready = Event()
         self.created_at = time.time()
         self.state = "submitted"
+        self.owner = owner
 
 
 class TaskQueue:
@@ -90,8 +91,8 @@ class TaskQueue:
         with self._lock:
             return len(self._pending)
 
-    def enqueue(self, task_id: str, text: str, metadata: dict) -> _PendingTask | None:
-        task = _PendingTask(task_id, text, metadata)
+    def enqueue(self, task_id: str, text: str, metadata: dict, owner: str = "") -> _PendingTask | None:
+        task = _PendingTask(task_id, text, metadata, owner)
         with self._lock:
             if task_id in self._pending or task_id in self._completed:
                 return None
@@ -166,6 +167,11 @@ class TaskQueue:
                     task.response = "(canceled)"
                 task.ready.set()
                 self._cache_completed(task)
+
+    def owner_for(self, task_id: str) -> str:
+        with self._lock:
+            task = self._pending.get(task_id) or self._completed.get(task_id)
+            return getattr(task, "owner", "") if task else ""
 
     def get_status(self, task_id: str) -> dict:
         with self._lock:
@@ -451,6 +457,9 @@ class A2ARequestHandler(BaseHTTPRequestHandler):
                 self._send_json({"jsonrpc": "2.0", "error": {"code": -32602, "message": "Missing task id"}, "id": rpc_id}, 400)
                 return
             tid = _safe_id(raw_tid, fallback="")
+            if not self._owns_task(tid):
+                self._send_json({"jsonrpc": "2.0", "error": {"code": -32003, "message": "Forbidden"}, "id": rpc_id}, 403)
+                return
             status = task_queue.get_status(tid)
             result = build_task_result(tid, status["state"], status.get("response", ""), native=native, context_id=tid)
         elif kind == "cancel":
@@ -459,6 +468,9 @@ class A2ARequestHandler(BaseHTTPRequestHandler):
                 self._send_json({"jsonrpc": "2.0", "error": {"code": -32602, "message": "Missing task id"}, "id": rpc_id}, 400)
                 return
             tid = _safe_id(raw_tid, fallback="")
+            if not self._owns_task(tid):
+                self._send_json({"jsonrpc": "2.0", "error": {"code": -32003, "message": "Forbidden"}, "id": rpc_id}, 403)
+                return
             task_queue.cancel(tid)
             task_store.update_task(tid, state="canceled", response="(canceled)")
             result = build_task_result(tid, "canceled", "(canceled)", native=native, context_id=tid)
@@ -482,6 +494,17 @@ class A2ARequestHandler(BaseHTTPRequestHandler):
         if native and kind in {"send", "get", "cancel"}:
             result = wrap_native_rpc_result(result)
         self._send_json({"jsonrpc": "2.0", "result": result, "id": rpc_id})
+
+    def _owner_id(self) -> str:
+        return f"{self.client_address[0]}:{bool(self.server.auth_token)}"
+
+    def _owns_task(self, task_id: str) -> bool:
+        owner_getter = getattr(task_queue, "owner_for", None)
+        if not callable(owner_getter):
+            status = task_queue.get_status(task_id)
+            return status.get("state") == "unknown"
+        owner = owner_getter(task_id)
+        return not owner or hmac.compare_digest(owner, self._owner_id())
 
     def _task_id_from_params(self, params: dict, message: dict) -> str:
         return _safe_id(
@@ -542,8 +565,18 @@ class A2ARequestHandler(BaseHTTPRequestHandler):
             return _task_failed(task_id, "Agent busy — too many pending tasks", native=native, context_id=context_id)
 
         background = _background_requested(params, message, metadata)
-        task = task_queue.enqueue(task_id, user_text, metadata)
+        try:
+            task = task_queue.enqueue(task_id, user_text, metadata, owner=self._owner_id())
+        except TypeError:
+            task = task_queue.enqueue(task_id, user_text, metadata)
+            if task is not None:
+                try:
+                    task.owner = self._owner_id()
+                except Exception:
+                    pass
         if task is None:
+            if not self._owns_task(task_id):
+                return _task_failed(task_id, "Forbidden — task id belongs to another caller", native=native, context_id=context_id or task_id)
             status = task_queue.get_status(task_id)
             return build_task_result(task_id, status["state"], status.get("response", ""), native=native, context_id=context_id or task_id)
 
