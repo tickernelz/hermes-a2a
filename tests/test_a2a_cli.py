@@ -40,11 +40,11 @@ def test_cli_status_json_reports_profile_install_state(tmp_path):
     write_profile(profile, {"plugins": {"enabled": ["a2a"]}, "a2a": {"server": {"port": 41731}}})
     plugin_dir = profile / "plugins" / "a2a"
     plugin_dir.mkdir(parents=True)
-    (plugin_dir / "plugin.yaml").write_text('name: a2a\nversion: "2.1.0"\n', encoding="utf-8")
+    (plugin_dir / "plugin.yaml").write_text('name: a2a\nversion: "0.2.2"\n', encoding="utf-8")
     state_dir = profile / "a2a"
     state_dir.mkdir()
     (state_dir / "state.json").write_text(
-        json.dumps({"schema_version": 1, "installed_version": "2.1.0", "migration_version": "2.1.0"}),
+        json.dumps({"schema_version": 1, "installed_version": "0.2.2", "migration_version": "0.2.2"}),
         encoding="utf-8",
     )
 
@@ -54,8 +54,8 @@ def test_cli_status_json_reports_profile_install_state(tmp_path):
     payload = json.loads(result.stdout)
     assert payload["profile"]["home"] == str(profile.resolve())
     assert payload["installed"] is True
-    assert payload["plugin_version"] == "2.1.0"
-    assert payload["state"]["installed_version"] == "2.1.0"
+    assert payload["plugin_version"] == "0.2.2"
+    assert payload["state"]["installed_version"] == "0.2.2"
     assert payload["config"]["a2a_enabled"] is True
 
 
@@ -97,9 +97,9 @@ def test_cli_install_writes_state_and_installs_plugin_without_restart(tmp_path):
     assert (profile / "plugins" / "a2a" / "plugin.yaml").exists()
     state = json.loads((profile / "a2a" / "state.json").read_text(encoding="utf-8"))
     assert state["schema_version"] == 1
-    assert state["installed_version"] == "2.1.0"
+    assert state["installed_version"] == "0.2.2"
     assert state["source"]["type"] == "local_checkout"
-    assert state["migration_version"] == "2.1.0"
+    assert state["migration_version"] == "0.2.2"
 
 
 def test_cli_native_install_delegates_to_new_manifest_flow(tmp_path):

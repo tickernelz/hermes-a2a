@@ -16,8 +16,8 @@ def test_agent_card_advertises_native_interface_metadata(monkeypatch):
 
     assert card["name"] == "primary_agent"
     assert card["url"] == "http://127.0.0.1:41731"
-    assert card["version"] == "2.1.0"
-    assert card["metadata"]["pluginVersion"] == "2.1.0"
+    assert card["version"] == "0.2.2"
+    assert card["metadata"]["pluginVersion"] == "0.2.2"
     assert card["metadata"]["a2aProtocolVersion"] == "0.3.0"
     assert "hermesRuntimeVersion" in card["metadata"]
     assert card["preferredTransport"] == "JSONRPC"

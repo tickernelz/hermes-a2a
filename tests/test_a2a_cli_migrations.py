@@ -15,8 +15,8 @@ def test_state_round_trip_writes_profile_local_state(tmp_path):
     home.mkdir()
     payload = {
         "schema_version": 1,
-        "installed_version": "2.1.0",
-        "migration_version": "2.1.0",
+        "installed_version": "0.2.2",
+        "migration_version": "0.2.2",
         "source": {"type": "test"},
         "migration_ledger": [],
     }
@@ -46,19 +46,19 @@ def test_adopt_existing_install_creates_baseline_state_for_profile_without_state
     home = tmp_path / ".hermes"
     plugin = home / "plugins" / "a2a"
     plugin.mkdir(parents=True)
-    (plugin / "plugin.yaml").write_text('name: a2a\nversion: "2.1.0"\n', encoding="utf-8")
+    (plugin / "plugin.yaml").write_text('name: a2a\nversion: "0.2.2"\n', encoding="utf-8")
 
-    state = adopt_existing_install(home, installed_version="2.1.0", source={"type": "local_checkout"})
+    state = adopt_existing_install(home, installed_version="0.2.2", source={"type": "local_checkout"})
 
     assert state["schema_version"] == 1
-    assert state["installed_version"] == "2.1.0"
-    assert state["migration_version"] == "2.1.0"
+    assert state["installed_version"] == "0.2.2"
+    assert state["migration_version"] == "0.2.2"
     assert state["source"] == {"type": "local_checkout"}
     assert state["migration_ledger"] == [
         {
             "id": "adopt_existing_install",
             "from": None,
-            "to": "2.1.0",
+            "to": "0.2.2",
             "status": "success",
             "backup_id": None,
         }
@@ -78,7 +78,7 @@ def test_adopt_existing_install_keeps_existing_state(tmp_path):
     }
     write_state(home, existing)
 
-    state = adopt_existing_install(home, installed_version="2.1.0", source={"type": "new"})
+    state = adopt_existing_install(home, installed_version="0.2.2", source={"type": "new"})
 
     assert state == existing
     assert load_state(home) == existing
