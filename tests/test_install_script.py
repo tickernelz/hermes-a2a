@@ -196,15 +196,15 @@ webhook:
     assert cfg["a2a"]["enabled"] is True
     assert cfg["a2a"]["server"]["port"] == 18081
     assert cfg["a2a"]["server"]["require_auth"] is True
-    assert cfg["a2a"]["agents"] == [{
-        "name": "reviewer_agent",
-        "url": "http://127.0.0.1:18082",
-        "description": "Reviewer test profile",
-        "auth_token_env": "A2A_AGENT_REVIEWER_TOKEN",
-        "enabled": True,
-        "tags": ["local"],
-        "trust_level": "trusted",
-    }]
+    assert len(cfg["a2a"]["agents"]) == 1
+    assert cfg["a2a"]["agents"][0]["name"] == "reviewer_agent"
+    assert cfg["a2a"]["agents"][0]["url"] == "http://127.0.0.1:18082"
+    assert cfg["a2a"]["agents"][0]["description"] == "Reviewer test profile"
+    assert cfg["a2a"]["agents"][0]["auth_token"]
+    assert cfg["a2a"]["agents"][0]["enabled"] is True
+    assert cfg["a2a"]["agents"][0]["tags"] == ["local"]
+    assert cfg["a2a"]["agents"][0]["trust_level"] == "trusted"
+    assert "auth_token_env" not in cfg["a2a"]["agents"][0]
 
     env_text = (home / ".env").read_text(encoding="utf-8")
     for key in [
@@ -214,10 +214,13 @@ webhook:
         "A2A_WEBHOOK_SECRET",
         "A2A_PUBLIC_URL",
         "A2A_AGENT_REVIEWER_TOKEN",
-        "WEBHOOK_ENABLED",
-        "WEBHOOK_PORT",
     ]:
+        assert env_text.count(f"{key}=") == 0
+    for key in ["WEBHOOK_ENABLED", "WEBHOOK_PORT"]:
         assert env_text.count(f"{key}=") == 1
+    assert "auth_token" in cfg["a2a"]["server"]
+    assert cfg["a2a"]["agents"][0]["auth_token"]
+    assert "auth_token_env" not in cfg["a2a"]["agents"][0]
     assert "EXISTING=1" in env_text
     assert (sibling / "config.yaml").read_text(encoding="utf-8") == "sibling: untouched\n"
     assert (sibling / ".env").read_text(encoding="utf-8") == "SIBLING=untouched\n"

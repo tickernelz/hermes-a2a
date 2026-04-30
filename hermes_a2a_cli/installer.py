@@ -14,6 +14,11 @@ except Exception:
     yaml = None
 
 
+class NoAliasDumper(yaml.SafeDumper if yaml is not None else object):
+    def ignore_aliases(self, data):
+        return True
+
+
 class InstallError(RuntimeError):
     pass
 
@@ -25,6 +30,12 @@ def load_config(config_path: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise InstallError("config.yaml must contain a mapping")
     return data
+
+
+def dump_config(config: dict[str, Any]) -> str:
+    if yaml is None:
+        raise InstallError("PyYAML is required to safely update config.yaml")
+    return yaml.dump(config, Dumper=NoAliasDumper, sort_keys=False, allow_unicode=True)
 
 
 def write_text(path: Path, text: str) -> None:
@@ -146,11 +157,41 @@ def explicit_a2a_keys() -> set[str]:
             "A2A_AGENT_DESCRIPTION",
             "A2A_REQUIRE_AUTH",
         ]
-        if os.environ.get(key) not in (None, "")
+        if os.environ.get(key) not in (None, "") and key in os.environ.get("HERMES_A2A_INSTALL_ENV_OVERRIDES", "").split(",")
     }
 
 
-def install_profile(home: Path, source_dir: Path, dashboard_dir: Path, *, dry_run: bool = False) -> dict[str, Any]:
+def build_compat_webhook_routes(a2a: dict[str, Any]) -> dict[str, Any]:
+    wake = a2a.get("wake") if isinstance(a2a.get("wake"), dict) else {}
+    dashboard = a2a.get("dashboard") if isinstance(a2a.get("dashboard"), dict) else {}
+    secret = str(wake.get("secret") or "")
+    route_name = str(wake.get("route") or "a2a_trigger").strip() or "a2a_trigger"
+    trigger: dict[str, Any] = {"secret": secret, "prompt": str(wake.get("prompt") or "[A2A trigger]")}
+    session = wake.get("session") if isinstance(wake.get("session"), dict) else {}
+    platform = str(session.get("platform") or "").strip()
+    chat_id = str(session.get("chat_id") or "").strip()
+    if platform and chat_id:
+        deliver_extra: dict[str, Any] = {"chat_id": chat_id}
+        if session.get("thread_id") not in (None, ""):
+            deliver_extra["thread_id"] = session["thread_id"]
+        actor = session.get("actor") if isinstance(session.get("actor"), dict) else {}
+        source: dict[str, Any] = {
+            "platform": platform,
+            "chat_type": str(session.get("chat_type") or "dm"),
+            "chat_id": chat_id,
+            "user_id": str(actor.get("id") or chat_id),
+            "user_name": str(actor.get("name") or "user"),
+        }
+        if session.get("thread_id") not in (None, ""):
+            source["thread_id"] = session["thread_id"]
+        trigger.update({"deliver": platform, "deliver_extra": deliver_extra, "source": source})
+    routes = {route_name: trigger}
+    if dashboard.get("enabled", True) is not False:
+        routes[str(dashboard.get("route") or "a2a_dashboard")] = {"secret": secret, "prompt": "[A2A dashboard]"}
+    return routes
+
+
+def install_profile(home: Path, source_dir: Path, dashboard_dir: Path, *, dry_run: bool = False, answers=None) -> dict[str, Any]:
     home = home.expanduser().resolve()
     config_path = home / "config.yaml"
     env_path = home / ".env"
@@ -175,6 +216,7 @@ def install_profile(home: Path, source_dir: Path, dashboard_dir: Path, *, dry_ru
 
     default_host = os.environ.get("A2A_HOST") or "127.0.0.1"
     default_port = os.environ.get("A2A_PORT") or "41731"
+    legacy_identity_from_env = any(line.startswith("A2A_AGENT_NAME=") or line.startswith("A2A_AGENT_DESCRIPTION=") for line in existing_env)
     a2a_host = env_or_config(existing_env, "A2A_HOST", existing_server.get("host"), default_host, explicit_keys)
     a2a_port = env_or_config(existing_env, "A2A_PORT", existing_server.get("port"), default_port, explicit_keys)
     a2a_public_url = env_or_config(
@@ -184,14 +226,24 @@ def install_profile(home: Path, source_dir: Path, dashboard_dir: Path, *, dry_ru
         os.environ.get("A2A_PUBLIC_URL") or f"http://{a2a_host}:{a2a_port}",
         explicit_keys,
     ).rstrip("/")
-    a2a_agent_name = env_or_config(existing_env, "A2A_AGENT_NAME", None, os.environ.get("A2A_AGENT_NAME") or "hermes-agent", explicit_keys)
+    existing_identity = existing_a2a.get("identity", {}) if isinstance(existing_a2a.get("identity"), dict) else {}
+    a2a_agent_name = env_or_config(
+        existing_env,
+        "A2A_AGENT_NAME",
+        existing_identity.get("name"),
+        os.environ.get("A2A_AGENT_NAME") or "hermes-agent",
+        explicit_keys,
+    )
     a2a_agent_description = env_or_config(
         existing_env,
         "A2A_AGENT_DESCRIPTION",
-        None,
+        existing_identity.get("description"),
         os.environ.get("A2A_AGENT_DESCRIPTION") or "Hermes A2A profile",
         explicit_keys,
     )
+    if not legacy_identity_from_env and not existing_identity and a2a_agent_name == "hermes-agent":
+        a2a_agent_name = "primary_agent"
+        a2a_agent_description = "Primary Hermes A2A profile"
     a2a_require_auth = env_or_config(
         existing_env,
         "A2A_REQUIRE_AUTH",
@@ -200,8 +252,17 @@ def install_profile(home: Path, source_dir: Path, dashboard_dir: Path, *, dry_ru
         explicit_keys,
     )
     webhook_port = choose_webhook_port(home, cfg, existing_env)
-    secret = env_value(existing_env, "A2A_WEBHOOK_SECRET", lambda: secrets.token_hex(24))
-    auth_token = env_value(existing_env, "A2A_AUTH_TOKEN", lambda: secrets.token_hex(24))
+    if answers is not None:
+        a2a_host = answers.host
+        a2a_port = str(answers.port)
+        a2a_public_url = answers.public_url.rstrip("/")
+        a2a_agent_name = answers.identity_name
+        a2a_agent_description = answers.identity_description
+        a2a_require_auth = "true" if answers.require_auth else "false"
+        webhook_port = answers.webhook_port
+    existing_wake = existing_a2a.get("wake", {}) if isinstance(existing_a2a.get("wake"), dict) else {}
+    secret = str(existing_wake.get("secret") or "").strip() or env_value(existing_env, "A2A_WEBHOOK_SECRET", lambda: secrets.token_hex(24))
+    auth_token = str(existing_server.get("auth_token") or "").strip() or env_value(existing_env, "A2A_AUTH_TOKEN", lambda: secrets.token_hex(24))
     remote_token_env = os.environ.get("A2A_REMOTE_TOKEN_ENV", "").strip()
     remote_token = env_value(existing_env, remote_token_env, lambda: secrets.token_hex(24)) if remote_token_env else ""
 
@@ -227,19 +288,14 @@ def install_profile(home: Path, source_dir: Path, dashboard_dir: Path, *, dry_ru
         shutil.copytree(dashboard_dir, plugin_dir / "dashboard", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
 
     env_lines = list(existing_env)
-    ensure_env(env_lines, "A2A_ENABLED", "true")
-    ensure_env(env_lines, "A2A_HOST", a2a_host, overwrite="A2A_HOST" in explicit_keys)
-    ensure_env(env_lines, "A2A_PORT", a2a_port, overwrite="A2A_PORT" in explicit_keys)
-    ensure_env(env_lines, "A2A_PUBLIC_URL", a2a_public_url, overwrite="A2A_PUBLIC_URL" in explicit_keys)
-    ensure_env(env_lines, "A2A_AGENT_NAME", a2a_agent_name, overwrite="A2A_AGENT_NAME" in explicit_keys)
-    ensure_env(env_lines, "A2A_AGENT_DESCRIPTION", a2a_agent_description, overwrite="A2A_AGENT_DESCRIPTION" in explicit_keys)
-    ensure_env(env_lines, "A2A_REQUIRE_AUTH", a2a_require_auth, overwrite="A2A_REQUIRE_AUTH" in explicit_keys)
-    ensure_env(env_lines, "A2A_AUTH_TOKEN", auth_token)
-    ensure_env(env_lines, "A2A_WEBHOOK_SECRET", secret)
+    secret_store = getattr(answers, "secret_store", "config") if answers is not None else "config"
+    if secret_store == "env":
+        ensure_env(env_lines, "A2A_AUTH_TOKEN", auth_token)
+        ensure_env(env_lines, "A2A_WEBHOOK_SECRET", secret)
+        if remote_token_env:
+            ensure_env(env_lines, remote_token_env, remote_token)
     ensure_env(env_lines, "WEBHOOK_ENABLED", "true")
     ensure_env(env_lines, "WEBHOOK_PORT", str(webhook_port))
-    if remote_token_env:
-        ensure_env(env_lines, remote_token_env, remote_token)
 
     plugins = cfg.setdefault("plugins", {})
     if not isinstance(plugins, dict):
@@ -260,18 +316,59 @@ def install_profile(home: Path, source_dir: Path, dashboard_dir: Path, *, dry_ru
             cfg["known_plugin_toolsets"] = known
         append_unique(ensure_list(known, platform), "a2a")
 
-    route = {"secret": secret, "prompt": "[A2A trigger]"}
     chat_id = os.environ.get("A2A_HOME_CHAT_ID", "").strip()
-    if platform and chat_id:
-        route["deliver"] = platform
-        route["deliver_extra"] = {"chat_id": chat_id}
-        route["source"] = {
-            "platform": platform,
-            "chat_type": os.environ.get("A2A_HOME_CHAT_TYPE", "dm").strip() or "dm",
-            "chat_id": chat_id,
-            "user_id": os.environ.get("A2A_HOME_USER_ID", "").strip() or chat_id,
-            "user_name": os.environ.get("A2A_HOME_USER_NAME", "").strip() or "user",
+
+    a2a = cfg.setdefault("a2a", {})
+    if not isinstance(a2a, dict):
+        a2a = {}
+        cfg["a2a"] = a2a
+    a2a["enabled"] = True
+    a2a["identity"] = {
+        **(a2a.get("identity") if isinstance(a2a.get("identity"), dict) else {}),
+        "name": a2a_agent_name,
+        "description": a2a_agent_description,
+    }
+    a2a["server"] = {
+        **(a2a.get("server") if isinstance(a2a.get("server"), dict) else {}),
+        "host": a2a_host,
+        "port": int(a2a_port),
+        "public_url": a2a_public_url,
+        "require_auth": bool_value(a2a_require_auth, True),
+        **({"auth_token_env": "A2A_AUTH_TOKEN"} if answers is not None and getattr(answers, "secret_store", "config") == "env" else {"auth_token": auth_token}),
+    }
+    a2a["wake"] = {
+        **(a2a.get("wake") if isinstance(a2a.get("wake"), dict) else {}),
+        "enabled": True,
+        "port": webhook_port,
+        **({"secret_env": "A2A_WEBHOOK_SECRET"} if answers is not None and getattr(answers, "secret_store", "config") == "env" else {"secret": secret}),
+        "route": "a2a_trigger",
+        "prompt": "[A2A trigger]",
+        "mode": "owner_session",
+    }
+    if answers is not None and getattr(answers, "wake_platform", "") and getattr(answers, "wake_chat_id", ""):
+        a2a["wake"]["session"] = {
+            "platform": answers.wake_platform,
+            "chat_id": answers.wake_chat_id,
+            "chat_type": answers.wake_chat_type or "dm",
+            "actor": {
+                "id": answers.wake_actor_id or answers.wake_chat_id,
+                "name": answers.wake_actor_name or "user",
+            },
         }
+        if getattr(answers, "wake_thread_id", ""):
+            a2a["wake"]["session"]["thread_id"] = int(answers.wake_thread_id) if str(answers.wake_thread_id).isdigit() else answers.wake_thread_id
+    elif platform and chat_id:
+        a2a["wake"]["session"] = {
+            "platform": platform,
+            "chat_id": chat_id,
+            "chat_type": os.environ.get("A2A_HOME_CHAT_TYPE", "dm").strip() or "dm",
+            "actor": {
+                "id": os.environ.get("A2A_HOME_USER_ID", "").strip() or chat_id,
+                "name": os.environ.get("A2A_HOME_USER_NAME", "").strip() or "user",
+            },
+        }
+    a2a["dashboard"] = {**(a2a.get("dashboard") if isinstance(a2a.get("dashboard"), dict) else {}), "enabled": True, "route": "a2a_dashboard"}
+    routes = build_compat_webhook_routes(a2a)
 
     for root_key in ("webhook",):
         webhook = cfg.setdefault(root_key, {})
@@ -289,8 +386,14 @@ def install_profile(home: Path, source_dir: Path, dashboard_dir: Path, *, dry_ru
         if not isinstance(routes, dict):
             routes = {}
             extra["routes"] = routes
-        routes["a2a_trigger"] = route
-        routes["a2a_dashboard"] = {"secret": secret, "prompt": "[A2A dashboard]"}
+        compat_routes = build_compat_webhook_routes(a2a)
+        if not compat_routes.get("a2a_trigger", {}).get("secret"):
+            compat_routes["a2a_trigger"]["secret"] = secret
+        if "a2a_dashboard" in compat_routes and not compat_routes["a2a_dashboard"].get("secret"):
+            compat_routes["a2a_dashboard"]["secret"] = secret
+        for route_name in ("a2a_trigger", "a2a_dashboard"):
+            routes.pop(route_name, None)
+        routes.update(compat_routes)
 
     platforms = cfg.setdefault("platforms", {})
     if not isinstance(platforms, dict):
@@ -310,21 +413,10 @@ def install_profile(home: Path, source_dir: Path, dashboard_dir: Path, *, dry_ru
     if not isinstance(platform_routes, dict):
         platform_routes = {}
         platform_extra["routes"] = platform_routes
-    platform_routes["a2a_trigger"] = dict(route)
-    platform_routes["a2a_dashboard"] = {"secret": secret, "prompt": "[A2A dashboard]"}
+    for route_name in ("a2a_trigger", "a2a_dashboard"):
+        platform_routes.pop(route_name, None)
+    platform_routes.update(routes)
 
-    a2a = cfg.setdefault("a2a", {})
-    if not isinstance(a2a, dict):
-        a2a = {}
-        cfg["a2a"] = a2a
-    a2a["enabled"] = True
-    a2a["server"] = {
-        **(a2a.get("server") if isinstance(a2a.get("server"), dict) else {}),
-        "host": a2a_host,
-        "port": int(a2a_port),
-        "public_url": a2a_public_url,
-        "require_auth": bool_value(a2a_require_auth, True),
-    }
     security = a2a.setdefault("security", {})
     if not isinstance(security, dict):
         security = {}
@@ -349,9 +441,29 @@ def install_profile(home: Path, source_dir: Path, dashboard_dir: Path, *, dry_ru
             agents = []
             a2a["agents"] = agents
         agents[:] = [agent for agent in agents if not (isinstance(agent, dict) and agent.get("name") == remote_name)]
-        agents.append({"name": remote_name, "url": remote_url, "description": os.environ.get("A2A_REMOTE_DESCRIPTION", "").strip(), "auth_token_env": remote_token_env, "enabled": True, "tags": ["local"], "trust_level": "trusted"})
+        agent = {"name": remote_name, "url": remote_url, "description": os.environ.get("A2A_REMOTE_DESCRIPTION", "").strip(), "enabled": True, "tags": ["local"], "trust_level": "trusted"}
+        if secret_store == "env" and remote_token_env:
+            agent["auth_token_env"] = remote_token_env
+        elif remote_token:
+            agent["auth_token"] = remote_token
+        agents.append(agent)
 
-    write_text(config_path, yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True))
+    stale_a2a_env_keys = {
+        "A2A_ENABLED",
+        "A2A_HOST",
+        "A2A_PORT",
+        "A2A_PUBLIC_URL",
+        "A2A_AGENT_NAME",
+        "A2A_AGENT_DESCRIPTION",
+        "A2A_REQUIRE_AUTH",
+    }
+    if secret_store == "config":
+        stale_a2a_env_keys.update({"A2A_AUTH_TOKEN", "A2A_WEBHOOK_SECRET"})
+        if remote_token_env:
+            stale_a2a_env_keys.add(remote_token_env)
+    env_lines = [line for line in env_lines if (line.split("=", 1)[0] if "=" in line else "") not in stale_a2a_env_keys]
+
+    write_text(config_path, dump_config(cfg))
     write_text(env_path, "\n".join(env_lines).rstrip() + "\n")
     return {"changed": True, "plan": plan, "backups": backups, "messages": [f"Installed plugin to {plugin_dir}", f"A2A install complete for {home}", "No restart performed. Restart the target Hermes gateway manually after reviewing the diff/config."]}
 

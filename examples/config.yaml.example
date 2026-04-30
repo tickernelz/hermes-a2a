@@ -1,65 +1,89 @@
-# Profile-local A2A configuration example.
-# Put this in the target profile config.yaml, not in a sibling profile.
+# Canonical profile-local A2A configuration example.
+# Prefer `hermes_a2a install` or `hermes_a2a migrate config-unify` instead of copying this blindly.
 
 plugins:
   enabled:
-    - a2a
+  - a2a
 
 platform_toolsets:
   discord:
-    - hermes-discord
-    - a2a
+  - a2a
 
 known_plugin_toolsets:
   discord:
-    - a2a
+  - a2a
 
 a2a:
   enabled: true
+  identity:
+    name: primary_agent
+    description: Primary Hermes A2A profile
   server:
     host: 127.0.0.1
     port: 41731
     public_url: http://127.0.0.1:41731
     require_auth: true
+    auth_token: "[REDACTED]"
+  wake:
+    enabled: true
+    port: 47644
+    secret: "[REDACTED]"
+    route: a2a_trigger
+    prompt: "[A2A trigger]"
+    mode: owner_session
+    session:
+      platform: discord
+      chat_id: "<discord-channel-or-thread-id>"
+      chat_type: group
+      actor:
+        id: "<discord-user-id>"
+        name: "<display-name>"
+  dashboard:
+    enabled: true
+    route: a2a_dashboard
+  runtime:
+    sync_response_timeout_seconds: 120
+    active_task_timeout_seconds: 7200
+    max_pending_tasks: 10
   security:
     allow_unconfigured_urls: false
     redact_outbound: true
     max_message_chars: 50000
     max_response_chars: 100000
+    rate_limit_per_minute: 20
     max_request_bytes: 1048576
     max_raw_part_bytes: 262144
     max_parts: 20
-    rate_limit_per_minute: 20
   agents:
-    - name: reviewer_agent
-      url: http://127.0.0.1:41732
-      description: Local reviewer Hermes profile
-      auth_token_env: A2A_AGENT_REVIEWER_TOKEN
-      enabled: true
-      tags: [local, reviewer]
-      trust_level: trusted
+  - name: reviewer_agent
+    url: http://127.0.0.1:41732
+    description: Local reviewer Hermes profile
+    auth_token: "[REDACTED]"
+    enabled: true
+    tags: [local, reviewer]
+    trust_level: trusted
 
 webhook:
   enabled: true
   extra:
     port: 47644
+    secret: "[REDACTED]"
     routes:
       a2a_trigger:
-        secret: <same random value as A2A_WEBHOOK_SECRET in .env>
+        secret: "[REDACTED]"
+        prompt: "[A2A trigger]"
         deliver: discord
         deliver_extra:
-          chat_id: '<discord-chat-id>'
-        prompt: '[A2A trigger]'
+          chat_id: "<discord-channel-or-thread-id>"
         source:
           platform: discord
           chat_type: group
-          chat_id: '<discord-chat-id>'
-          user_id: '<discord-user-id>'
-          user_name: '<display-name>'
-
-# Note: Hermes webhook validation reads the route secret from config.yaml,
-# while the A2A plugin uses A2A_WEBHOOK_SECRET from .env when signing the
-# internal wake request. They must match exactly.
+          chat_id: "<discord-channel-or-thread-id>"
+          user_id: "<discord-user-id>"
+          user_name: "<display-name>"
+      a2a_dashboard:
+        secret: "[REDACTED]"
+        prompt: "[A2A dashboard]"
 
 platforms:
   webhook:
@@ -68,26 +92,20 @@ platforms:
       port: 47644
       routes:
         a2a_trigger:
-          secret: <same random value as A2A_WEBHOOK_SECRET in .env>
+          secret: "[REDACTED]"
+          prompt: "[A2A trigger]"
           deliver: discord
           deliver_extra:
-            chat_id: '<discord-chat-id>'
-          prompt: '[A2A trigger]'
+            chat_id: "<discord-channel-or-thread-id>"
           source:
             platform: discord
             chat_type: group
-            chat_id: '<discord-chat-id>'
-            user_id: '<discord-user-id>'
-            user_name: '<display-name>'
+            chat_id: "<discord-channel-or-thread-id>"
+            user_id: "<discord-user-id>"
+            user_name: "<display-name>"
+        a2a_dashboard:
+          secret: "[REDACTED]"
+          prompt: "[A2A dashboard]"
 
-# Matching .env values for this profile:
-# A2A_ENABLED=true
-# A2A_HOST=127.0.0.1
-# A2A_PORT=41731
-# A2A_PUBLIC_URL=http://127.0.0.1:41731
-# A2A_REQUIRE_AUTH=true
-# A2A_AUTH_TOKEN=<secret for inbound calls to this profile>
-# A2A_WEBHOOK_SECRET=<secret used by webhook route>
-# A2A_AGENT_REVIEWER_TOKEN=<secret expected by reviewer_agent>
-# WEBHOOK_ENABLED=true
-# WEBHOOK_PORT=47644
+# `webhook.extra.routes` and `platforms.webhook.extra.routes` are generated
+# compatibility sections for Hermes Gateway. Treat `a2a.*` as source of truth.

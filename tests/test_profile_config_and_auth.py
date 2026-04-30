@@ -241,9 +241,24 @@ def test_persistence_writes_atomically_under_active_profile(monkeypatch, tmp_pat
 
 
 def test_server_agent_card_uses_public_url(monkeypatch):
-    monkeypatch.setenv("A2A_PUBLIC_URL", "https://primary.example/a2a/")
-    monkeypatch.setenv("A2A_REQUIRE_AUTH", "true")
-    monkeypatch.delenv("A2A_AUTH_TOKEN", raising=False)
+    monkeypatch.setattr(
+        server,
+        "get_server_config",
+        lambda: type(
+            "ServerCfg",
+            (),
+            {
+                "host": "127.0.0.1",
+                "port": 41731,
+                "public_url": "https://primary.example/a2a",
+                "require_auth": True,
+                "sync_response_timeout_seconds": 120,
+                "active_task_timeout_seconds": 7200,
+                "max_pending_tasks": 10,
+                "auth_token": "",
+            },
+        )(),
+    )
 
     a2a_server = server.A2AServer("127.0.0.1", 0)
     try:

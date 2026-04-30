@@ -269,10 +269,17 @@ def test_post_llm_fails_extra_active_tasks_instead_of_dropping_them(monkeypatch)
     a2a_plugin._active_a2a_tasks.clear()
 
 
-def test_trigger_webhook_ignores_invalid_webhook_port(monkeypatch):
+def test_trigger_webhook_ignores_invalid_wake_port(monkeypatch):
     opened = []
-    monkeypatch.setenv("A2A_WEBHOOK_SECRET", "secret")
-    monkeypatch.setenv("WEBHOOK_PORT", "not-a-port")
+    monkeypatch.setattr(
+        server,
+        "get_wake_config",
+        lambda: type(
+            "WakeCfg",
+            (),
+            {"secret": "secret", "port": 70000, "route": "a2a_trigger"},
+        )(),
+    )
     monkeypatch.setattr(server.urllib.request, "urlopen", lambda *args, **kwargs: opened.append(args) or None)
 
     server._trigger_webhook("task-1")

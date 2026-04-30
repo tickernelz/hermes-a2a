@@ -2,11 +2,27 @@ from plugin.server import A2AServer
 
 
 def test_agent_card_advertises_native_interface_metadata(monkeypatch):
-    monkeypatch.setenv("A2A_AUTH_TOKEN", "token")
-    monkeypatch.setenv("A2A_AGENT_NAME", "primary_agent")
-    monkeypatch.setenv("A2A_AGENT_DESCRIPTION", "Primary")
-    monkeypatch.setenv("A2A_PUBLIC_URL", "http://127.0.0.1:41731")
-    monkeypatch.setenv("A2A_REQUIRE_AUTH", "true")
+    monkeypatch.setattr(
+        "plugin.server.get_identity_config",
+        lambda: type("Identity", (), {"name": "primary_agent", "description": "Primary"})(),
+    )
+    monkeypatch.setattr(
+        "plugin.server.get_server_config",
+        lambda: type(
+            "ServerCfg",
+            (),
+            {
+                "host": "127.0.0.1",
+                "port": 41731,
+                "public_url": "http://127.0.0.1:41731",
+                "require_auth": True,
+                "sync_response_timeout_seconds": 120,
+                "active_task_timeout_seconds": 7200,
+                "max_pending_tasks": 10,
+                "auth_token": "token",
+            },
+        )(),
+    )
 
     server = A2AServer("127.0.0.1", 0)
     try:
@@ -16,8 +32,8 @@ def test_agent_card_advertises_native_interface_metadata(monkeypatch):
 
     assert card["name"] == "primary_agent"
     assert card["url"] == "http://127.0.0.1:41731"
-    assert card["version"] == "0.2.2"
-    assert card["metadata"]["pluginVersion"] == "0.2.2"
+    assert card["version"] == "0.3.0"
+    assert card["metadata"]["pluginVersion"] == "0.3.0"
     assert card["metadata"]["a2aProtocolVersion"] == "0.3.0"
     assert "hermesRuntimeVersion" in card["metadata"]
     assert card["preferredTransport"] == "JSONRPC"
@@ -38,9 +54,23 @@ def test_agent_card_advertises_native_interface_metadata(monkeypatch):
 
 
 def test_agent_card_does_not_advertise_push_without_public_url_or_auth(monkeypatch):
-    monkeypatch.delenv("A2A_AUTH_TOKEN", raising=False)
-    monkeypatch.delenv("A2A_PUBLIC_URL", raising=False)
-    monkeypatch.setenv("A2A_REQUIRE_AUTH", "true")
+    monkeypatch.setattr(
+        "plugin.server.get_server_config",
+        lambda: type(
+            "ServerCfg",
+            (),
+            {
+                "host": "127.0.0.1",
+                "port": 41731,
+                "public_url": "",
+                "require_auth": True,
+                "sync_response_timeout_seconds": 120,
+                "active_task_timeout_seconds": 7200,
+                "max_pending_tasks": 10,
+                "auth_token": "",
+            },
+        )(),
+    )
 
     server = A2AServer("127.0.0.1", 0)
     try:

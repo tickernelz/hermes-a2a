@@ -24,22 +24,10 @@ def test_server_config_exposes_runtime_limits_from_yaml():
     assert server.max_pending_tasks == 25
 
 
-def test_server_config_env_overrides_runtime_limits(monkeypatch):
+def test_server_config_runtime_limits_ignore_legacy_environment(monkeypatch):
     monkeypatch.setenv("A2A_SYNC_RESPONSE_TIMEOUT", "33")
-    monkeypatch.setenv("A2A_ACTIVE_TASK_TIMEOUT", "7200")
+    monkeypatch.setenv("A2A_ACTIVE_TASK_TIMEOUT", "3600")
     monkeypatch.setenv("A2A_MAX_PENDING", "17")
-
-    server = get_server_config({"a2a": {"server": {}}})
-
-    assert server.sync_response_timeout_seconds == 33
-    assert server.active_task_timeout_seconds == 7200
-    assert server.max_pending_tasks == 17
-
-
-def test_server_config_invalid_runtime_limits_fall_back_to_safe_defaults(monkeypatch):
-    monkeypatch.setenv("A2A_SYNC_RESPONSE_TIMEOUT", "0")
-    monkeypatch.setenv("A2A_ACTIVE_TASK_TIMEOUT", "bad")
-    monkeypatch.setenv("A2A_MAX_PENDING", "-3")
 
     server = get_server_config({"a2a": {"server": {}}})
 
@@ -49,7 +37,16 @@ def test_server_config_invalid_runtime_limits_fall_back_to_safe_defaults(monkeyp
 
 
 def test_server_uses_configured_max_pending(monkeypatch):
-    monkeypatch.setenv("A2A_MAX_PENDING", "2")
+    monkeypatch.setattr("plugin.server.get_server_config", lambda: type("ServerCfg", (), {
+        "host": "127.0.0.1",
+        "port": 0,
+        "public_url": "http://127.0.0.1:0",
+        "require_auth": True,
+        "auth_token": "token",
+        "sync_response_timeout_seconds": 120,
+        "active_task_timeout_seconds": 7200,
+        "max_pending_tasks": 2,
+    })())
     srv = A2AServer("127.0.0.1", 0)
     try:
         assert srv.max_pending_tasks == 2

@@ -122,7 +122,7 @@ def _resolve_target(name: str, url: str) -> tuple[str, str, bool]:
     if not get_security_config().allow_unconfigured_urls:
         raise ValueError(
             "Direct A2A URL is not configured; use a configured agent name "
-            "or set a2a.security.allow_unconfigured_urls=true / A2A_ALLOW_UNCONFIGURED_URLS=true"
+            "or set a2a.security.allow_unconfigured_urls=true"
         )
 
     return _validate_target_url(url, allow_private=False), "", False

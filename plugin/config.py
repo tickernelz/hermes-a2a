@@ -1,8 +1,4 @@
-"""Configuration helpers for the A2A plugin.
-
-Supports both the original simple config shape and the newer profile-safe,
-config-driven registry shape.
-"""
+"""Configuration helpers for the A2A plugin."""
 
 from __future__ import annotations
 
@@ -60,6 +56,12 @@ def load_config() -> dict[str, Any]:
 
 
 @dataclass(frozen=True)
+class IdentityConfig:
+    name: str
+    description: str
+
+
+@dataclass(frozen=True)
 class ServerConfig:
     host: str
     port: int
@@ -68,6 +70,18 @@ class ServerConfig:
     sync_response_timeout_seconds: int
     active_task_timeout_seconds: int
     max_pending_tasks: int
+    auth_token: str
+
+
+@dataclass(frozen=True)
+class WakeConfig:
+    enabled: bool
+    port: int
+    secret: str
+    route: str
+    prompt: str
+    mode: str
+    session: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -87,25 +101,48 @@ def _a2a_section(config: dict[str, Any] | None = None) -> dict[str, Any]:
     return a2a if isinstance(a2a, dict) else {}
 
 
+def _env_ref_value(section: dict[str, Any], key: str) -> str:
+    direct = str(section.get(key) or "").strip()
+    if direct:
+        return direct
+    env_name = str(section.get(f"{key}_env") or "").strip()
+    if env_name:
+        return os.getenv(env_name, "").strip()
+    return ""
+
+
+def get_identity_config(config: dict[str, Any] | None = None) -> IdentityConfig:
+    a2a = _a2a_section(config)
+    identity = a2a.get("identity", {})
+    if not isinstance(identity, dict):
+        identity = {}
+    name = str(identity.get("name") or "hermes-agent").strip()
+    description = str(identity.get("description") or "A self-improving AI agent powered by Hermes").strip()
+    return IdentityConfig(name=name, description=description)
+
+
 def get_server_config(config: dict[str, Any] | None = None) -> ServerConfig:
     a2a = _a2a_section(config)
     server = a2a.get("server", {})
     if not isinstance(server, dict):
         server = {}
 
-    host = os.getenv("A2A_HOST") or str(server.get("host") or "127.0.0.1")
-    port = _int(os.getenv("A2A_PORT") or server.get("port"), 41731)
-    public_url = (os.getenv("A2A_PUBLIC_URL") or str(server.get("public_url") or "")).rstrip("/")
-    require_auth = _truthy(os.getenv("A2A_REQUIRE_AUTH")) or _truthy(server.get("require_auth"))
+    host = str(server.get("host") or "127.0.0.1")
+    port = _int(server.get("port"), 41731)
+    public_url = (str(server.get("public_url") or "")).rstrip("/")
+    require_auth = _truthy(server.get("require_auth"))
+    runtime = a2a.get("runtime", {})
+    if not isinstance(runtime, dict):
+        runtime = {}
     sync_response_timeout_seconds = _positive_int(
-        os.getenv("A2A_SYNC_RESPONSE_TIMEOUT") or server.get("sync_response_timeout_seconds"),
+        runtime.get("sync_response_timeout_seconds", server.get("sync_response_timeout_seconds")),
         120,
     )
     active_task_timeout_seconds = _positive_int(
-        os.getenv("A2A_ACTIVE_TASK_TIMEOUT") or server.get("active_task_timeout_seconds"),
+        runtime.get("active_task_timeout_seconds", server.get("active_task_timeout_seconds")),
         7200,
     )
-    max_pending_tasks = _positive_int(os.getenv("A2A_MAX_PENDING") or server.get("max_pending_tasks"), 10)
+    max_pending_tasks = _positive_int(runtime.get("max_pending_tasks", server.get("max_pending_tasks")), 10)
     return ServerConfig(
         host=host,
         port=port,
@@ -114,6 +151,25 @@ def get_server_config(config: dict[str, Any] | None = None) -> ServerConfig:
         sync_response_timeout_seconds=sync_response_timeout_seconds,
         active_task_timeout_seconds=active_task_timeout_seconds,
         max_pending_tasks=max_pending_tasks,
+        auth_token=_env_ref_value(server, "auth_token"),
+    )
+
+
+
+def get_wake_config(config: dict[str, Any] | None = None) -> WakeConfig:
+    a2a = _a2a_section(config)
+    wake = a2a.get("wake", {})
+    if not isinstance(wake, dict):
+        wake = {}
+    session = wake.get("session") if isinstance(wake.get("session"), dict) else {}
+    return WakeConfig(
+        enabled=wake.get("enabled", True) is not False,
+        port=_int(wake.get("port"), 47644),
+        secret=_env_ref_value(wake, "secret"),
+        route=str(wake.get("route") or "a2a_trigger").strip(),
+        prompt=str(wake.get("prompt") or "[A2A trigger]").strip(),
+        mode=str(wake.get("mode") or "owner_session").strip(),
+        session=dict(session),
     )
 
 
@@ -123,10 +179,7 @@ def get_security_config(config: dict[str, Any] | None = None) -> SecurityConfig:
     if not isinstance(security, dict):
         security = {}
     return SecurityConfig(
-        allow_unconfigured_urls=(
-            _truthy(os.getenv("A2A_ALLOW_UNCONFIGURED_URLS"))
-            or _truthy(security.get("allow_unconfigured_urls"))
-        ),
+        allow_unconfigured_urls=_truthy(security.get("allow_unconfigured_urls")),
         max_message_chars=_int(security.get("max_message_chars"), 50_000),
         max_response_chars=_int(security.get("max_response_chars"), 100_000),
         max_request_bytes=_int(security.get("max_request_bytes"), 1_048_576),

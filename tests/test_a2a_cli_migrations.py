@@ -6,6 +6,7 @@ import pytest
 from test_a2a_cli import run_cli
 
 from hermes_a2a_cli.migrations.base import MigrationStep
+from hermes_a2a_cli.migrations import MIGRATIONS
 from hermes_a2a_cli.migrations.registry import build_migration_plan, register_migration
 from hermes_a2a_cli.state import adopt_existing_install, load_state, state_path, write_state
 
@@ -109,6 +110,13 @@ def test_migration_registry_builds_stepwise_plan():
     plan = build_migration_plan("1.0.0", "2.0.0", migrations=migrations)
 
     assert [step.id for step in plan] == ["1.0.0_to_1.1.0", "1.1.0_to_2.0.0"]
+
+
+def test_packaged_migrations_are_registered_for_update_flow():
+    plan = build_migration_plan("0.2.2", "0.3.0")
+
+    assert [step.id for step in plan] == ["v0_2_2_to_v0_3_0_config_unify"]
+    assert any(step.from_version == "0.2.2" and step.to_version == "0.3.0" for step in MIGRATIONS)
 
 
 def test_migration_registry_fails_closed_when_path_missing():

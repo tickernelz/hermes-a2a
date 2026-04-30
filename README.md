@@ -73,7 +73,7 @@ Restart the target Hermes gateway after install. The installer intentionally doe
 ### Install a pinned CLI/source release
 
 ```bash
-HERMES_A2A_REF=v0.2.2 \
+HERMES_A2A_REF=v0.3.0 \
   curl -fsSL https://raw.githubusercontent.com/tickernelz/hermes-a2a/main/scripts/a2a.sh | bash
 ```
 
@@ -178,61 +178,69 @@ Native-style responses are wrapped as `result.task` or `result.message`. Legacy 
 
 ## Configuration
 
-Minimal config shape:
+Hermes A2A is config-first. New installs write a canonical `a2a` block in `config.yaml`; `.env` is only for advanced secret references or unrelated Hermes provider/platform keys.
 
 ```yaml
 a2a:
   enabled: true
+  identity:
+    name: primary_agent
+    description: Primary Hermes A2A profile
   server:
     host: 127.0.0.1
     port: 41731
     public_url: http://127.0.0.1:41731
     require_auth: true
-  security:
-    allow_unconfigured_urls: false
-    redact_outbound: true
-    max_request_bytes: 1048576
-    max_message_chars: 50000
-    max_response_chars: 100000
-    max_raw_part_bytes: 262144
-    max_parts: 20
-    rate_limit_per_minute: 20
+    auth_token: "[REDACTED]"
+  wake:
+    enabled: true
+    port: 47644
+    secret: "[REDACTED]"
+    route: a2a_trigger
+    prompt: "[A2A trigger]"
+    mode: owner_session
+    session:
+      platform: discord
+      chat_id: "<discord-channel-or-thread-id>"
+      chat_type: group
+      actor:
+        id: "<discord-user-id>"
+        name: "<display-name>"
   agents:
-    - name: coder
-      url: http://127.0.0.1:41732
-      description: Coding Hermes profile
-      auth_token_env: A2A_AGENT_CODER_TOKEN
-      enabled: true
-      tags: [local]
-      trust_level: trusted
+  - name: coder
+    url: http://127.0.0.1:41732
+    description: Coding Hermes profile
+    auth_token: "[REDACTED]"
+    enabled: true
+    tags: [local]
+    trust_level: trusted
 ```
 
-Secrets stay in `.env`:
+`wake.session.actor` selects the Hermes gateway session for internal A2A wake events. It is not an allowlist and not authentication.
 
-```env
-A2A_AUTH_TOKEN=<local-bearer-token>
-A2A_AGENT_CODER_TOKEN=<remote-bearer-token>
-A2A_WEBHOOK_SECRET=<shared-webhook-secret>
+The installer still generates Hermes webhook compatibility sections (`webhook.extra.routes` and `platforms.webhook.extra.routes`) from `a2a.wake`, but those are internal generated config. Edit the canonical `a2a` block or rerun the wizard/migration instead of hand-editing `deliver`/`source`.
+
+To convert an old env-heavy install:
+
+```bash
+hermes_a2a migrate config-unify --profile default --dry-run
+hermes_a2a migrate config-unify --profile default --yes
 ```
 
-Useful installer variables:
+Advanced secret-store mode can use env references instead of inline config secrets:
 
-| Variable | Purpose |
-| --- | --- |
-| `A2A_HOST` | A2A server bind host. Default: `127.0.0.1`. |
-| `A2A_PORT` | A2A server port. Use a unique port per profile. |
-| `A2A_PUBLIC_URL` | URL advertised in the agent card. |
-| `A2A_AGENT_NAME` | Local agent name. |
-| `A2A_AGENT_DESCRIPTION` | Local agent description. |
-| `A2A_REQUIRE_AUTH` | Require inbound Bearer auth. Default: `true`. |
-| `A2A_WEBHOOK_PORT` / `WEBHOOK_PORT` | Hermes webhook listener port. Must be unique per running profile. |
-| `A2A_REMOTE_NAME` | Optional configured remote agent name. |
-| `A2A_REMOTE_URL` | Optional configured remote agent URL. |
-| `A2A_REMOTE_TOKEN_ENV` | Env var that stores the remote Bearer token. |
-| `HERMES_A2A_REF` | Git branch, tag, or commit used by the curl bootstrap. |
-| `HERMES_A2A_REPO` | GitHub repo used by the curl bootstrap. |
-| `HERMES_A2A_INSTALL_DIR` | Persistent CLI source root. Default: `~/.local/share/hermes-a2a`. |
-| `HERMES_A2A_BIN_DIR` | Directory for the `hermes_a2a` executable. Default: `~/.local/bin`. |
+```yaml
+a2a:
+  server:
+    auth_token_env: A2A_AUTH_TOKEN
+  wake:
+    secret_env: A2A_WEBHOOK_SECRET
+  agents:
+  - name: coder
+    auth_token_env: A2A_AGENT_CODER_TOKEN
+```
+
+Bootstrap variables such as `HERMES_A2A_REF`, `HERMES_A2A_REPO`, `HERMES_A2A_INSTALL_DIR`, and `HERMES_A2A_BIN_DIR` still control how the persistent CLI is installed.
 
 ## Background tasks
 

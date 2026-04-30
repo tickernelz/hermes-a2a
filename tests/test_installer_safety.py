@@ -77,10 +77,11 @@ def test_install_preserves_existing_env_and_server_config_without_explicit_overr
     assert result.returncode == 0, result.stderr + result.stdout
     env_text = (profile / ".env").read_text(encoding="utf-8")
     cfg = yaml.safe_load((profile / "config.yaml").read_text(encoding="utf-8"))
-    assert "A2A_PORT=49999" in env_text
-    assert "A2A_PUBLIC_URL=http://127.0.0.1:49999" in env_text
-    assert "A2A_AGENT_NAME=custom-agent" in env_text
-    assert "A2A_REQUIRE_AUTH=false" in env_text
+    assert "A2A_PORT=49999" not in env_text
+    assert "A2A_PUBLIC_URL=http://127.0.0.1:49999" not in env_text
+    assert "A2A_AGENT_NAME=custom-agent" not in env_text
+    assert "A2A_REQUIRE_AUTH=false" not in env_text
+    assert cfg["a2a"]["identity"]["name"] == "custom-agent"
     assert cfg["a2a"]["server"]["port"] == 49999
     assert cfg["a2a"]["server"]["public_url"] == "http://127.0.0.1:49999"
     assert cfg["a2a"]["server"]["require_auth"] is False
@@ -99,6 +100,7 @@ def test_install_explicit_env_overrides_existing_values(tmp_path):
         ["--hermes-home", str(profile), "--yes"],
         home=tmp_path,
         extra_env={
+            "HERMES_A2A_INSTALL_ENV_OVERRIDES": "A2A_PORT,A2A_PUBLIC_URL,A2A_AGENT_NAME,A2A_REQUIRE_AUTH",
             "A2A_PORT": "45555",
             "A2A_PUBLIC_URL": "http://127.0.0.1:45555",
             "A2A_AGENT_NAME": "new-agent",
@@ -109,10 +111,11 @@ def test_install_explicit_env_overrides_existing_values(tmp_path):
     assert result.returncode == 0, result.stderr + result.stdout
     env_text = (profile / ".env").read_text(encoding="utf-8")
     cfg = yaml.safe_load((profile / "config.yaml").read_text(encoding="utf-8"))
-    assert "A2A_PORT=45555" in env_text
-    assert "A2A_PUBLIC_URL=http://127.0.0.1:45555" in env_text
-    assert "A2A_AGENT_NAME=new-agent" in env_text
-    assert "A2A_REQUIRE_AUTH=true" in env_text
+    assert "A2A_PORT=45555" not in env_text
+    assert "A2A_PUBLIC_URL=http://127.0.0.1:45555" not in env_text
+    assert "A2A_AGENT_NAME=new-agent" not in env_text
+    assert "A2A_REQUIRE_AUTH=true" not in env_text
+    assert cfg["a2a"]["identity"]["name"] == "new-agent"
     assert cfg["a2a"]["server"]["port"] == 45555
     assert cfg["a2a"]["server"]["public_url"] == "http://127.0.0.1:45555"
     assert cfg["a2a"]["server"]["require_auth"] is True

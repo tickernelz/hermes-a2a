@@ -24,7 +24,7 @@ from typing import Any, Optional
 import urllib.request
 import urllib.error
 
-from .config import get_security_config, get_server_config
+from .config import get_identity_config, get_security_config, get_server_config, get_wake_config
 from .metadata import A2A_PROTOCOL_VERSION, PLUGIN_VERSION
 from .protocol import (
     ProtocolError,
@@ -272,24 +272,21 @@ def clear_runtime_server(server=None) -> None:
 
 def _trigger_webhook(task_id: str = ""):
     """POST to the internal webhook to trigger an agent turn."""
-    secret = os.getenv("A2A_WEBHOOK_SECRET", "")
+    wake_cfg = get_wake_config()
+    secret = wake_cfg.secret
     if not secret:
         return
 
-    try:
-        port = int(os.getenv("WEBHOOK_PORT", "47644"))
-    except (TypeError, ValueError):
-        logger.warning("[A2A] Invalid WEBHOOK_PORT; skipping webhook trigger")
-        return
+    port = wake_cfg.port
     if port < 1 or port > 65535:
-        logger.warning("[A2A] WEBHOOK_PORT out of range; skipping webhook trigger")
+        logger.warning("[A2A] wake port out of range; skipping webhook trigger")
         return
 
     body = json.dumps({"event_type": "a2a_inbound", "task_id": task_id}).encode()
     sig = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
 
     req = urllib.request.Request(
-        f"http://127.0.0.1:{port}/webhooks/a2a_trigger",
+        f"http://127.0.0.1:{port}/webhooks/{wake_cfg.route}",
         data=body,
         headers={
             "Content-Type": "application/json",
@@ -363,14 +360,14 @@ class A2ARequestHandler(BaseHTTPRequestHandler):
         token = self.server.auth_token
         if not token:
             if self.server.require_auth:
-                logger.warning("[A2A] Rejecting unauthenticated request because A2A_REQUIRE_AUTH is enabled")
+                logger.warning("[A2A] Rejecting unauthenticated request because a2a.server.require_auth is enabled")
                 return False
             remote = self.client_address[0]
             allowed = remote in ("127.0.0.1", "::1")
             if allowed:
                 logger.warning(
                     "[A2A] Allowing unauthenticated localhost request; set "
-                    "A2A_AUTH_TOKEN and A2A_REQUIRE_AUTH=true in production"
+                    "a2a.server.auth_token and a2a.server.require_auth=true in production"
                 )
             return allowed
         auth_header = self.headers.get("Authorization", "")
@@ -725,10 +722,11 @@ class A2AServer(ThreadingHTTPServer):
 
     def __init__(self, host: str, port: int):
         server_cfg = get_server_config()
+        identity_cfg = get_identity_config()
         security_cfg = get_security_config()
-        self.agent_name = os.getenv("A2A_AGENT_NAME", "hermes-agent")
-        self.agent_description = os.getenv("A2A_AGENT_DESCRIPTION", "A self-improving AI agent powered by Hermes")
-        self.auth_token = os.getenv("A2A_AUTH_TOKEN", "")
+        self.agent_name = identity_cfg.name
+        self.agent_description = identity_cfg.description
+        self.auth_token = server_cfg.auth_token
         self.require_auth = server_cfg.require_auth
         self.public_url = server_cfg.public_url
         self.max_message_chars = security_cfg.max_message_chars
@@ -741,7 +739,7 @@ class A2AServer(ThreadingHTTPServer):
         self.max_pending_tasks = server_cfg.max_pending_tasks
         self.limiter = RateLimiter(max_requests=security_cfg.rate_limit_per_minute)
         if self.require_auth and not self.auth_token:
-            logger.warning("[A2A] A2A_REQUIRE_AUTH is enabled but A2A_AUTH_TOKEN is missing; POST requests will be rejected")
+            logger.warning("[A2A] a2a.server.require_auth is enabled but a2a.server.auth_token is missing; POST requests will be rejected")
         super().__init__((host, port), A2ARequestHandler)
 
     def build_agent_card(self) -> dict:

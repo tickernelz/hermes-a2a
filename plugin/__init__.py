@@ -12,7 +12,7 @@ import time
 from .schemas import A2A_DISCOVER, A2A_CALL, A2A_LIST, A2A_GET, A2A_CANCEL
 from .tools import handle_discover, handle_call, handle_get, handle_cancel, handle_list
 from . import server as a2a_server
-from .config import get_server_config, load_agents
+from .config import get_identity_config, get_server_config, get_wake_config, load_agents, load_config
 from .paths import conversation_dir
 from .persistence import save_exchange
 from .security import audit
@@ -32,8 +32,8 @@ _ACTIVE_TASK_TIMEOUT = 7200
 
 def _validate_config():
     """Warn on missing webhook config at startup. Does not modify config."""
-    if not os.getenv("A2A_WEBHOOK_SECRET", ""):
-        logger.warning("[A2A] A2A_WEBHOOK_SECRET not set — instant wake disabled, messages will queue until next user turn")
+    if not get_wake_config().secret:
+        logger.warning("[A2A] wake secret not set — instant wake disabled, messages will queue until next user turn")
 
     try:
         from hermes_cli.config import load_config
@@ -65,9 +65,12 @@ def _validate_config():
 
 
 def register(ctx):
-    if not os.getenv("A2A_ENABLED", "").lower() in ("1", "true", "yes"):
+    config = load_config()
+    a2a_config = config.get("a2a") if isinstance(config.get("a2a"), dict) else {}
+    enabled = a2a_config.get("enabled", False) is True
+    if not enabled:
         _stop_server()
-        logger.info("[A2A] Disabled (set A2A_ENABLED=true to enable)")
+        logger.info("[A2A] Disabled (set a2a.enabled=true to enable)")
         return
 
     _validate_config()
@@ -100,7 +103,7 @@ def _cmd_status() -> str:
     server_cfg = get_server_config()
     host = server_cfg.host
     port = server_cfg.port
-    name = os.getenv("A2A_AGENT_NAME", "hermes-agent")
+    name = get_identity_config().name
     pending = a2a_server.task_queue.pending_count()
     state = a2a_server.get_runtime_state()
     thread = state.get("thread")
