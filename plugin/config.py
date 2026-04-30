@@ -29,6 +29,11 @@ def _int(value: Any, default: int) -> int:
         return default
 
 
+def _positive_int(value: Any, default: int) -> int:
+    result = _int(value, default)
+    return result if result > 0 else default
+
+
 def _load_yaml_config() -> dict[str, Any]:
     path = config_path()
     if not path.exists():
@@ -60,6 +65,9 @@ class ServerConfig:
     port: int
     public_url: str
     require_auth: bool
+    sync_response_timeout_seconds: int
+    active_task_timeout_seconds: int
+    max_pending_tasks: int
 
 
 @dataclass(frozen=True)
@@ -89,7 +97,24 @@ def get_server_config(config: dict[str, Any] | None = None) -> ServerConfig:
     port = _int(os.getenv("A2A_PORT") or server.get("port"), 41731)
     public_url = (os.getenv("A2A_PUBLIC_URL") or str(server.get("public_url") or "")).rstrip("/")
     require_auth = _truthy(os.getenv("A2A_REQUIRE_AUTH")) or _truthy(server.get("require_auth"))
-    return ServerConfig(host=host, port=port, public_url=public_url, require_auth=require_auth)
+    sync_response_timeout_seconds = _positive_int(
+        os.getenv("A2A_SYNC_RESPONSE_TIMEOUT") or server.get("sync_response_timeout_seconds"),
+        120,
+    )
+    active_task_timeout_seconds = _positive_int(
+        os.getenv("A2A_ACTIVE_TASK_TIMEOUT") or server.get("active_task_timeout_seconds"),
+        7200,
+    )
+    max_pending_tasks = _positive_int(os.getenv("A2A_MAX_PENDING") or server.get("max_pending_tasks"), 10)
+    return ServerConfig(
+        host=host,
+        port=port,
+        public_url=public_url,
+        require_auth=require_auth,
+        sync_response_timeout_seconds=sync_response_timeout_seconds,
+        active_task_timeout_seconds=active_task_timeout_seconds,
+        max_pending_tasks=max_pending_tasks,
+    )
 
 
 def get_security_config(config: dict[str, Any] | None = None) -> SecurityConfig:

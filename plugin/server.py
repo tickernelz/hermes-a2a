@@ -25,6 +25,7 @@ import urllib.request
 import urllib.error
 
 from .config import get_security_config, get_server_config
+from .metadata import A2A_PROTOCOL_VERSION, PLUGIN_VERSION
 from .protocol import (
     ProtocolError,
     build_task_result,
@@ -578,7 +579,10 @@ class A2ARequestHandler(BaseHTTPRequestHandler):
 
         audit.log("task_received", {"task_id": task_id, "length": len(user_text), "parts": len(normalized.safe_parts)})
 
-        if task_queue.pending_count() >= _MAX_PENDING:
+        max_pending_tasks = getattr(self.server, "max_pending_tasks", _MAX_PENDING)
+        if not isinstance(max_pending_tasks, int) or isinstance(max_pending_tasks, bool) or max_pending_tasks <= 0:
+            max_pending_tasks = _MAX_PENDING
+        if task_queue.pending_count() >= max_pending_tasks:
             return _task_failed(task_id, "Agent busy — too many pending tasks", native=native, context_id=context_id)
 
         background = _background_requested(params, message, metadata)
@@ -614,7 +618,10 @@ class A2ARequestHandler(BaseHTTPRequestHandler):
         if background:
             return build_task_result(task_id, "submitted", "(submitted — poll with GetTask/tasks/get)", native=native, context_id=context_id)
 
-        task.ready.wait(timeout=_RESPONSE_TIMEOUT)
+        sync_timeout = getattr(self.server, "sync_response_timeout_seconds", _RESPONSE_TIMEOUT)
+        if not isinstance(sync_timeout, int) or isinstance(sync_timeout, bool) or sync_timeout <= 0:
+            sync_timeout = _RESPONSE_TIMEOUT
+        task.ready.wait(timeout=sync_timeout)
 
         if task.response is None:
             return build_task_result(task_id, "working", "(processing — poll with tasks/get)", native=native, context_id=context_id)
@@ -729,6 +736,9 @@ class A2AServer(ThreadingHTTPServer):
         self.max_request_bytes = security_cfg.max_request_bytes
         self.max_raw_part_bytes = security_cfg.max_raw_part_bytes
         self.max_parts = security_cfg.max_parts
+        self.sync_response_timeout_seconds = server_cfg.sync_response_timeout_seconds
+        self.active_task_timeout_seconds = server_cfg.active_task_timeout_seconds
+        self.max_pending_tasks = server_cfg.max_pending_tasks
         self.limiter = RateLimiter(max_requests=security_cfg.rate_limit_per_minute)
         if self.require_auth and not self.auth_token:
             logger.warning("[A2A] A2A_REQUIRE_AUTH is enabled but A2A_AUTH_TOKEN is missing; POST requests will be rejected")
@@ -743,15 +753,15 @@ class A2AServer(ThreadingHTTPServer):
             "name": self.agent_name,
             "description": self.agent_description,
             "url": public_url,
-            "version": HERMES_VERSION,
+            "version": PLUGIN_VERSION,
             "protocol": "a2a",
-            "protocolVersion": "0.3.0",
+            "protocolVersion": A2A_PROTOCOL_VERSION,
             "preferredTransport": "JSONRPC",
             "supportedInterfaces": [
                 {
                     "url": public_url,
                     "protocolBinding": "JSONRPC",
-                    "protocolVersion": "0.3.0",
+                    "protocolVersion": A2A_PROTOCOL_VERSION,
                 }
             ],
             "additionalInterfaces": [
@@ -795,5 +805,13 @@ class A2AServer(ThreadingHTTPServer):
             "security": [{"bearerAuth": []}] if self.auth_token else [],
             "authentication": {
                 "schemes": ["bearer"] if self.auth_token else [],
+            },
+            "metadata": {
+                "pluginVersion": PLUGIN_VERSION,
+                "a2aProtocolVersion": A2A_PROTOCOL_VERSION,
+                "hermesRuntimeVersion": HERMES_VERSION,
+                "syncResponseTimeoutSeconds": self.sync_response_timeout_seconds,
+                "activeTaskTimeoutSeconds": self.active_task_timeout_seconds,
+                "maxPendingTasks": self.max_pending_tasks,
             },
         }

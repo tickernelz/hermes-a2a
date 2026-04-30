@@ -17,13 +17,17 @@ from .paths import conversation_dir
 from .persistence import save_exchange
 from .security import audit
 
+
+def _is_positive_int(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
 logger = logging.getLogger(__name__)
 
 _server = None
 _server_thread: threading.Thread | None = None
 _active_a2a_tasks: dict[str, dict] = {}
 _active_tasks_lock = threading.Lock()
-_ACTIVE_TASK_TIMEOUT = 300
+_ACTIVE_TASK_TIMEOUT = 7200
 
 
 def _validate_config():
@@ -243,13 +247,23 @@ def _format_task_context(task, *, include_privacy_note: bool = True) -> str:
     return prefix + header + "\n" + task.text
 
 
+def _active_task_timeout_seconds() -> int:
+    value = getattr(_server, "active_task_timeout_seconds", _ACTIVE_TASK_TIMEOUT)
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return _ACTIVE_TASK_TIMEOUT
+    return value if _is_positive_int(value) else _ACTIVE_TASK_TIMEOUT
+
+
 def _expire_stale_active_tasks(now: float | None = None) -> None:
     current = time.time() if now is None else now
+    timeout = _active_task_timeout_seconds()
     expired: list[str] = []
     with _active_tasks_lock:
         for task_id, info in list(_active_a2a_tasks.items()):
             activated_at = float(info.get("activated_at") or current)
-            if current - activated_at > _ACTIVE_TASK_TIMEOUT:
+            if current - activated_at > timeout:
                 expired.append(task_id)
                 _active_a2a_tasks.pop(task_id, None)
     for task_id in expired:
