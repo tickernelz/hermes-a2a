@@ -1,182 +1,184 @@
-# hermes-a2a
+<p align="center">
+  <img src="assets/banner.png" alt="Hermes A2A banner" width="100%">
+</p>
 
-Profile-safe Agent-to-Agent communication for [Hermes Agent](https://github.com/NousResearch/hermes-agent).
+<h1 align="center">Hermes A2A</h1>
 
-This plugin lets one Hermes profile expose an A2A-compatible HTTP endpoint and call other configured A2A agents through Hermes tools. It is designed for multi-profile setups where every agent has its own profile directory, port, state, secrets, and gateway session.
+<p align="center">
+  Profile-safe Agent-to-Agent bridge for <a href="https://github.com/NousResearch/hermes-agent">Hermes Agent</a>.
+</p>
 
-## What this provides
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#usage">Usage</a> ·
+  <a href="#configuration">Configuration</a> ·
+  <a href="#safety-model">Safety</a>
+</p>
 
-- Local A2A HTTP server with `/.well-known/agent.json` discovery.
-- Hermes tools: `a2a_list`, `a2a_discover`, and `a2a_call`.
-- Profile-local state, audit logs, and conversation storage.
-- Config-driven remote agent registry.
-- Bearer-token auth with env-based outbound tokens.
-- HMAC-signed webhook wake into an existing Hermes gateway session.
-- Deterministic webhook wake by `task_id` instead of trusting raw webhook text.
-- Idempotent profile-safe installer with dry-run and backups.
-- Zero runtime dependencies beyond the Python standard library.
+## What is this?
 
-## Requirements
+Hermes A2A lets one Hermes profile talk to another through an A2A-compatible HTTP server and a small set of Hermes tools.
 
-- Hermes Agent v2026.4.23+ with plugin support.
-- A Hermes profile directory containing `config.yaml`.
-- `curl` or `wget` for one-line install/update/uninstall.
-- `PyYAML` available to the Python interpreter used by Hermes or `python3` for config updates.
+It is built for real multi-profile setups: every agent keeps its own config, ports, tokens, task state, audit logs, and gateway session. No shared global state nonsense.
 
-## Install without cloning
+## Highlights
 
-The recommended entrypoint is one script. It auto-detects Hermes profiles; in an interactive terminal it asks which profile to target when more than one profile exists. In non-interactive mode it uses the only detected profile, or you can override the target with `--profile`, `--hermes-home`, or `HERMES_HOME`.
+- Native-ish A2A JSON-RPC support: `SendMessage`, `GetTask`, `CancelTask`.
+- Legacy compatibility: `tasks/send`, `tasks/get`, `tasks/cancel`.
+- Hermes tools: `a2a_list`, `a2a_discover`, `a2a_call`, `a2a_get`, `a2a_cancel`.
+- Background task flow with polling and authenticated push callbacks.
+- Profile-local SQLite task store, audit log, and conversation persistence.
+- Bearer-token auth for inbound calls and env-based tokens for outbound agents.
+- Signed webhook wake into the running Hermes gateway.
+- Stale/empty webhook triggers are dropped instead of leaking into Discord or the LLM.
+- Installer/update CLI with dry-run, backups, state manifest, and no automatic restart.
+- Python standard library runtime for the plugin itself.
+
+## Quick start
+
+Bootstrap the CLI once:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/tickernelz/hermes-a2a/main/scripts/a2a.sh \
-  | bash -s -- install --dry-run
+curl -fsSL https://raw.githubusercontent.com/tickernelz/hermes-a2a/main/scripts/a2a.sh | bash
 ```
 
-Review the output. If it targets the right profile, run the same command without `--dry-run`.
+This installs:
+
+```text
+~/.local/bin/hermes_a2a
+~/.local/share/hermes-a2a/current/
+```
+
+If `~/.local/bin` is not in your `PATH`, add it first:
 
 ```bash
-A2A_PORT=41731 \
-A2A_PUBLIC_URL=http://127.0.0.1:41731 \
-A2A_AGENT_NAME=my_agent \
-A2A_AGENT_DESCRIPTION='My Hermes profile' \
-A2A_HOME_PLATFORM=discord \
-A2A_HOME_CHAT_TYPE=group \
-A2A_HOME_CHAT_ID=123456789012345678 \
-A2A_HOME_USER_ID=123456789012345678 \
-A2A_HOME_USER_NAME='Hermes User' \
-A2A_REMOTE_NAME=other_agent \
-A2A_REMOTE_URL=http://127.0.0.1:41732 \
-A2A_REMOTE_DESCRIPTION='Other Hermes profile' \
-A2A_REMOTE_TOKEN_ENV=A2A_AGENT_OTHER_TOKEN \
-  curl -fsSL https://raw.githubusercontent.com/tickernelz/hermes-a2a/main/scripts/a2a.sh \
-  | bash -s -- install --dry-run
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
-Target a specific Hermes profile explicitly when needed:
+Then inspect the target profile before changing anything:
+
+```bash
+hermes_a2a doctor
+hermes_a2a install --dry-run
+```
+
+If the plan looks right:
+
+```bash
+hermes_a2a install
+```
+
+Restart the target Hermes gateway after install. The installer intentionally does not restart anything.
+
+### Install a pinned CLI/source release
+
+```bash
+HERMES_A2A_REF=v0.2.0 \
+  curl -fsSL https://raw.githubusercontent.com/tickernelz/hermes-a2a/main/scripts/a2a.sh | bash
+```
+
+### Target a specific profile
+
+```bash
+hermes_a2a install --profile coder --dry-run
+```
+
+Or target a profile directory directly:
+
+```bash
+hermes_a2a install --hermes-home /path/to/hermes/profile --dry-run
+```
+
+### Optional one-line install
+
+If you already know the target is safe, the bootstrap script can install the CLI and then delegate to it:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/tickernelz/hermes-a2a/main/scripts/a2a.sh \
   | bash -s -- install --profile coder --dry-run
-
-curl -fsSL https://raw.githubusercontent.com/tickernelz/hermes-a2a/main/scripts/a2a.sh \
-  | bash -s -- install --hermes-home /path/to/hermes/profile --dry-run
 ```
 
-To pin a branch, tag, or commit:
+Without an explicit command, the curl bootstrap only installs the CLI. It does not mutate any Hermes profile.
+
+## Update and uninstall
+
+Update uses the persistent `hermes_a2a` command. It backs up the previous plugin payload and keeps config/env/state intact.
 
 ```bash
-HERMES_A2A_REF=v0.3.0 \
-  curl -fsSL https://raw.githubusercontent.com/tickernelz/hermes-a2a/main/scripts/a2a.sh \
-  | bash -s -- install --dry-run
+hermes_a2a update --dry-run
 ```
 
-## Update
-
-Update re-runs the same idempotent installer against the requested repo/ref. It backs up existing files and does not restart Hermes.
+Uninstall removes only `plugins/a2a` from the selected profile. Config, secrets, logs, task state, and conversations are preserved so cleanup stays explicit.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/tickernelz/hermes-a2a/main/scripts/a2a.sh \
-  | bash -s -- update --dry-run
+hermes_a2a uninstall --dry-run
 ```
 
-Remove `--dry-run` after reviewing the output.
-
-## Uninstall
-
-Uninstall only removes the plugin files under the selected profile's `plugins/a2a` directory. It does not remove A2A config, env secrets, logs, or conversations. That is intentional: cleanup of profile config and history should be explicit and reviewable.
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/tickernelz/hermes-a2a/main/scripts/a2a.sh \
-  | bash -s -- uninstall --dry-run
-```
-
-Remove `--dry-run` after reviewing the output.
-
-## Local checkout workflow
+## Local checkout
 
 ```bash
 git clone https://github.com/tickernelz/hermes-a2a.git
 cd hermes-a2a
 ./install.sh --dry-run
-./install.sh --profile coder --dry-run
-./install.sh --hermes-home /path/to/hermes/profile --dry-run
 ```
 
-## Target selection
+The shell scripts are thin wrappers around the Python CLI:
 
-| Option / variable | Purpose |
-| --- | --- |
-| Auto-detect | Finds `~/.hermes/config.yaml` and `~/.hermes/profiles/*/config.yaml`. Prompts in an interactive terminal when multiple profiles exist. |
-| `--profile NAME` | Targets `~/.hermes/profiles/NAME`, with `default` and `main` mapping to `~/.hermes`. |
-| `--hermes-home PATH` | Targets an explicit Hermes profile path. |
-| `HERMES_HOME` | Environment override for the target Hermes profile path. |
+```bash
+python -m hermes_a2a_cli status --profile default
+python -m hermes_a2a_cli doctor --profile default
+python -m hermes_a2a_cli install --profile default --dry-run
+python -m hermes_a2a_cli update --profile default --dry-run
+python -m hermes_a2a_cli uninstall --profile default --dry-run
+```
 
-## Installer environment
+## Usage
 
-Common optional variables:
+After restart, the profile exposes:
 
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `A2A_HOST` | `127.0.0.1` | Host for the profile-local A2A HTTP server. |
-| `A2A_PORT` | `41731` | Port for the A2A HTTP server. Use a unique port per profile. |
-| `A2A_PUBLIC_URL` | `http://$A2A_HOST:$A2A_PORT` | URL advertised in the agent card. |
-| `A2A_AGENT_NAME` | `hermes-agent` | Local agent name. |
-| `A2A_AGENT_DESCRIPTION` | `Hermes A2A profile` | Local agent description. |
-| `A2A_REQUIRE_AUTH` | `true` | Require Bearer token for inbound A2A POST requests. |
-| `A2A_WEBHOOK_PORT` / `WEBHOOK_PORT` | auto | Hermes webhook listener port used for A2A wake requests. Defaults to `47644` for the main profile and auto-picks a nearby free port for named profiles; override when you need a fixed value. |
-| `A2A_HOME_PLATFORM` | empty | Platform whose toolsets should include `a2a`, for example `discord` or `telegram`. |
-| `A2A_HOME_CHAT_TYPE` | `dm` | Source chat type used for webhook session routing. |
-| `A2A_HOME_CHAT_ID` | empty | Source/delivery chat ID for webhook session routing. |
-| `A2A_HOME_USER_ID` | chat ID | Source user ID for webhook session routing. |
-| `A2A_HOME_USER_NAME` | `user` | Source user name for webhook session routing. |
-| `A2A_REMOTE_NAME` | empty | Optional remote agent registry name. |
-| `A2A_REMOTE_URL` | empty | Optional remote agent URL. |
-| `A2A_REMOTE_DESCRIPTION` | empty | Optional remote agent description. |
-| `A2A_REMOTE_TOKEN_ENV` | empty | Env var name that stores the remote agent Bearer token. |
+```text
+GET  http://127.0.0.1:41731/health
+GET  http://127.0.0.1:41731/.well-known/agent.json
+POST http://127.0.0.1:41731/
+```
 
-Curl entrypoint variables:
+From Hermes, use the A2A tools:
 
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `HERMES_A2A_REPO` | `tickernelz/hermes-a2a` | GitHub repo to download. |
-| `HERMES_A2A_REF` | `main` | Branch, tag, or commit to download. |
-| `HERMES_A2A_CACHE` | `$XDG_CACHE_HOME/hermes-a2a` or `~/.cache/hermes-a2a` | Archive cache directory. |
+```text
+a2a_list                         # list configured agents
+a2a_discover(name="coder")       # fetch the agent card
+a2a_call(name="coder", message="Review this plan")
+a2a_call(name="coder", message="Run this long job", background=true)
+a2a_get(name="coder", task_id="...")
+a2a_cancel(name="coder", task_id="...")
+```
 
-## What install changes
+Raw JSON-RPC example:
 
-Only the selected Hermes profile directory is mutated:
+```bash
+curl -X POST http://127.0.0.1:41731/ \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer <token>' \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": "1",
+    "method": "SendMessage",
+    "params": {
+      "message": {
+        "kind": "message",
+        "role": "user",
+        "messageId": "task-001",
+        "parts": [{"kind": "text", "text": "Hello from another agent"}]
+      }
+    }
+  }'
+```
 
-- copies `plugin/` and `dashboard/` to `plugins/a2a`
-- backs up existing plugin/config/env before writing
-- appends missing `.env` keys without overwriting existing values
-- enables `plugins.enabled: [a2a]`
-- adds `a2a` to `platform_toolsets.<A2A_HOME_PLATFORM>` when provided
-- adds `a2a` to `known_plugin_toolsets.<A2A_HOME_PLATFORM>` when provided
-- enables webhook support
-- sets the Hermes webhook listener port in both `.env` (`WEBHOOK_PORT`) and `platforms.webhook.extra.port`
-- creates or updates the `a2a_trigger` webhook route
-- writes `a2a.server`, `a2a.security`, and optional `a2a.agents` entries
+Native-style responses are wrapped as `result.task` or `result.message`. Legacy callers keep the legacy task result shape.
 
-The installer never restarts Hermes or any gateway.
+## Configuration
 
-## Webhook routing
-
-Inbound A2A requests are stored as tasks. The plugin then sends an HMAC-signed webhook to Hermes to wake the target profile. The webhook payload contains a `task_id`; the plugin resolves that ID from the profile-local task queue before injecting anything into the agent turn.
-
-Raw webhook text is not treated as user content. If a requested `task_id` is missing, the plugin falls back to the oldest pending task for compatibility.
-
-The webhook listener port must be unique for every concurrently running Hermes profile. If two profiles use the same webhook port, one gateway will fail to connect the webhook platform and can leave A2A calls waiting for a response.
-
-The webhook secret intentionally exists in two places:
-
-- `.env`: `A2A_WEBHOOK_SECRET` for the plugin signer
-- `config.yaml`: `a2a_trigger.secret` for Hermes webhook validation
-
-Keep them identical. Remote agent Bearer tokens should use `auth_token_env` and stay in `.env`, not inline in `config.yaml`.
-
-## Configure remote agents manually
-
-Prefer config-driven targets over direct URLs:
+Minimal config shape:
 
 ```yaml
 a2a:
@@ -189,123 +191,100 @@ a2a:
   security:
     allow_unconfigured_urls: false
     redact_outbound: true
+    max_request_bytes: 1048576
     max_message_chars: 50000
     max_response_chars: 100000
-    max_request_bytes: 1048576
     max_raw_part_bytes: 262144
     max_parts: 20
     rate_limit_per_minute: 20
   agents:
-    - name: other_agent
+    - name: coder
       url: http://127.0.0.1:41732
-      description: Another Hermes profile
-      auth_token_env: A2A_AGENT_OTHER_TOKEN
+      description: Coding Hermes profile
+      auth_token_env: A2A_AGENT_CODER_TOKEN
       enabled: true
       tags: [local]
       trust_level: trusted
 ```
 
+Secrets stay in `.env`:
+
 ```env
-A2A_AUTH_TOKEN=<local-inbound-token>
-A2A_AGENT_OTHER_TOKEN=<remote-inbound-token>
+A2A_AUTH_TOKEN=<local-bearer-token>
+A2A_AGENT_CODER_TOKEN=<remote-bearer-token>
 A2A_WEBHOOK_SECRET=<shared-webhook-secret>
 ```
 
-## Native A2A compatibility
+Useful installer variables:
 
-The plugin accepts both legacy JSON-RPC task methods (`tasks/send`, `tasks/get`, `tasks/cancel`) and native A2A JSON-RPC methods (`SendMessage`, `GetTask`, `CancelTask`). It also accepts `message/send` as a compatibility alias for earlier draft clients. Legacy callers keep the legacy result shape. Native callers receive a spec-shaped JSON-RPC result wrapper such as `{ "task": { ... } }` or `{ "message": { ... } }`; the contained Task uses `kind: "task"`, `contextId`, lowercase A2A task states, `status.message.parts`, and `artifacts[].artifactId`.
+| Variable | Purpose |
+| --- | --- |
+| `A2A_HOST` | A2A server bind host. Default: `127.0.0.1`. |
+| `A2A_PORT` | A2A server port. Use a unique port per profile. |
+| `A2A_PUBLIC_URL` | URL advertised in the agent card. |
+| `A2A_AGENT_NAME` | Local agent name. |
+| `A2A_AGENT_DESCRIPTION` | Local agent description. |
+| `A2A_REQUIRE_AUTH` | Require inbound Bearer auth. Default: `true`. |
+| `A2A_WEBHOOK_PORT` / `WEBHOOK_PORT` | Hermes webhook listener port. Must be unique per running profile. |
+| `A2A_REMOTE_NAME` | Optional configured remote agent name. |
+| `A2A_REMOTE_URL` | Optional configured remote agent URL. |
+| `A2A_REMOTE_TOKEN_ENV` | Env var that stores the remote Bearer token. |
+| `HERMES_A2A_REF` | Git branch, tag, or commit used by the curl bootstrap. |
+| `HERMES_A2A_REPO` | GitHub repo used by the curl bootstrap. |
+| `HERMES_A2A_INSTALL_DIR` | Persistent CLI source root. Default: `~/.local/share/hermes-a2a`. |
+| `HERMES_A2A_BIN_DIR` | Directory for the `hermes_a2a` executable. Default: `~/.local/bin`. |
 
-Outbound calls discover the remote agent card first. Agents that advertise JSON-RPC v0.3+ support receive `SendMessage`/`GetTask` with `kind` parts; older or unknown agents fall back to `tasks/send`/`tasks/get`. Authenticated outbound HTTP blocks redirects so bearer tokens are not forwarded to another origin. Native background calls can include `configuration.pushNotificationConfig` when a trusted callback URL is explicitly provided; otherwise background mode remains poll-first through `a2a_get`.
+## Background tasks
 
-Inbound message parts are normalized into a safe Hermes prompt. Text and JSON/data parts are rendered as text. File, image, audio, video, URL, and raw/blob parts are represented as attachment references with sanitized filename, MIME type, size, checksum, and URL origin. Remote attachment URLs are not fetched automatically; only `http` and `https` references are accepted. Full URLs remain in structured metadata for tools/audit, but only the origin is shown in the model prompt to reduce prompt-injection surface. Inline raw content is never injected into the prompt and is capped by `a2a.security.max_raw_part_bytes`.
-
-This is a compatibility bridge, not unrestricted binary transport or remote tool execution. Use artifact references and explicit Hermes tools (`vision_analyze`, OCR/document tools, STT, etc.) for actual inspection.
-
-## Usage
-
-After the target Hermes gateway is restarted, the agent becomes discoverable at:
+Background mode is for long-running agent work.
 
 ```text
-http://127.0.0.1:41731/.well-known/agent.json
+a2a_call(name="coder", message="Audit this repo", background=true)
 ```
 
-From Hermes, use:
+The caller gets a task id immediately. Later it can poll:
 
-- `a2a_list` to list configured remote agents
-- `a2a_discover` to fetch a configured agent card
-- `a2a_call` to send a message to a configured agent
-- `a2a_call(..., background=true)` to submit long-running work without blocking the caller
-- `a2a_get` to poll a background task later
-- `a2a_cancel` to request cancellation when the remote supports it
-
-Background calls persist a profile-local task record in `a2a_tasks.json` before the HTTP POST. If the remote returns `working`/`submitted`, the tool returns immediately instead of polling; final state can be retrieved with `a2a_get`, through Hermes compatibility notifications (`tasks/notify` / `TaskNotification`), or through authenticated native push payloads (`task`, `message`, `statusUpdate`, `artifactUpdate`) when a push callback was explicitly configured. Terminal task states are immutable, so late duplicate notifications cannot overwrite a completed, failed, or canceled result.
-
-A raw A2A JSON-RPC call looks like this:
-
-```bash
-curl -X POST http://127.0.0.1:41731 \
-  -H 'Content-Type: application/json' \
-  -H 'Authorization: Bearer <token>' \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": "1",
-    "method": "tasks/send",
-    "params": {
-      "id": "task-001",
-      "message": {
-        "role": "user",
-        "parts": [{"type": "text", "text": "Hello"}]
-      }
-    }
-  }'
+```text
+a2a_get(name="coder", task_id="...")
 ```
 
-If a remote agent returns `working`, poll with `tasks/get`:
-
-```bash
-curl -X POST http://127.0.0.1:41731 \
-  -H 'Content-Type: application/json' \
-  -H 'Authorization: Bearer <token>' \
-  -d '{"jsonrpc":"2.0","id":"1","method":"tasks/get","params":{"id":"task-001"}}'
-```
-
-## Limits and rate limiting
-
-`max_message_chars`, `max_response_chars`, `max_request_bytes`, and `rate_limit_per_minute` are safety guardrails, not performance tuning knobs. They cap pathological payloads, accidental loops, and hostile retries before they can pin the gateway or exhaust memory. Raising them can allow larger exchanges, but disabling them is a bad trade-off for always-on agents. The default request body cap is 1 MiB; the message/response caps apply after JSON parsing to the text exchanged with the agent.
+If a trusted callback URL is supplied, native calls include `configuration.pushNotificationConfig` with a generated per-task token. The callback must present that token through `X-A2A-Notification-Token`. Duplicate terminal updates are ignored, so late notifications cannot overwrite completed, failed, or canceled tasks.
 
 ## Safety model
 
 | Layer | Behavior |
 | --- | --- |
-| Profile isolation | Paths resolve under the selected profile directory; no hardcoded `~/.hermes` state. |
-| Inbound auth | Bearer token required when `A2A_REQUIRE_AUTH=true` / `a2a.server.require_auth=true`. |
-| Outbound auth | Remote tokens are resolved through `auth_token_env`. |
-| Registry | Configured agent names are preferred; direct URLs are blocked by default. |
-| Input validation | JSON-RPC and A2A task payloads are validated before queueing. |
-| Queue lifecycle | Tasks move through submitted, working, completed, failed, canceled, rejected, or expired states. Terminal states are immutable. |
-| Background tasks | Long-running outbound work persists profile-local task records and can be polled or completed through authenticated notifications. |
-| Webhook wake | Signed wake request routes by `task_id`; raw webhook text is ignored as content, and empty/stale triggers are dropped instead of reaching Discord/LLM. |
-| Persistence | Writes are profile-local, atomic, capped, and redacted where appropriate. |
-| Request/body limits | Oversized HTTP bodies and oversized message text are rejected or truncated before agent execution. |
-| Rate limit | Inbound requests are rate-limited per remote address to prevent retry storms and loops. |
+| Profile isolation | All state resolves under the selected Hermes profile. |
+| Inbound auth | Bearer token required when auth is enabled. |
+| Outbound auth | Remote tokens are read from env vars, not inline config. |
+| Direct URLs | Blocked by default; configured agent names are preferred. |
+| Webhook wake | Signed and resolved by task id; raw webhook text is never trusted as message content. |
+| Stale triggers | Dropped before they reach Discord or the LLM. |
+| Attachments | URLs/files are represented as sanitized references; remote files are not fetched automatically. |
+| Persistence | SQLite task state and logs are profile-local and capped/redacted where needed. |
+| Rate limits | Inbound POSTs are rate-limited per remote address. |
 
-## File layout
+## Installed files
 
-Installed under the selected profile's `plugins/a2a/`:
+The curl bootstrap writes the persistent CLI here:
 
-| File | Purpose |
-| --- | --- |
-| `__init__.py` | Plugin entrypoint, hook registration, slash command, server startup. |
-| `server.py` | A2A JSON-RPC server, task queue, webhook trigger. |
-| `tools.py` | Hermes tool implementations for outbound A2A. |
-| `config.py` | Config loading, registry normalization, token env resolution. |
-| `paths.py` | Profile-safe path resolution. |
-| `security.py` | Filtering, redaction, rate limiting, audit helpers. |
-| `persistence.py` | Profile-local conversation persistence. |
-| `task_store.py` | Profile-local background task state store. |
-| `schemas.py` | Tool schemas. |
-| `plugin.yaml` | Plugin manifest. |
-| `dashboard/` | Dashboard assets and plugin API support. |
+```text
+~/.local/bin/hermes_a2a
+~/.local/share/hermes-a2a/current/
+```
+
+The plugin installer writes only to the selected profile:
+
+```text
+$HERMES_HOME/plugins/a2a/
+$HERMES_HOME/a2a/state.json
+$HERMES_HOME/a2a/backups/
+$HERMES_HOME/a2a_tasks.sqlite3
+$HERMES_HOME/a2a_audit.jsonl
+$HERMES_HOME/a2a_conversations/
+```
+
+It also updates the selected profile's `config.yaml` and `.env` after creating backups. It never restarts Hermes.
 
 ## Development
 
@@ -313,22 +292,24 @@ Installed under the selected profile's `plugins/a2a/`:
 bash -n install.sh
 bash -n uninstall.sh
 bash -n scripts/a2a.sh
-python -m py_compile plugin/*.py dashboard/plugin_api.py tests/*.py
+python -m py_compile hermes_a2a_cli/*.py hermes_a2a_cli/migrations/*.py plugin/*.py dashboard/plugin_api.py tests/*.py
 python -m pytest -q
 git diff --check
 ```
 
-## Known limitations
+Use the same Python environment Hermes uses if your system Python does not have the test dependencies.
 
-- No A2A streaming/SSE support yet.
-- Agent card skills are still static.
-- Config and env cleanup after uninstall is manual.
-- The final privacy boundary is still the agent's judgment; technical filters reduce leaks but cannot prove intent safety.
+## Limitations
+
+- No SSE streaming yet.
+- Agent-card skills are static.
+- Uninstall preserves config, env, logs, and state by design.
+- This is a bridge for Hermes profiles, not a sandbox boundary. Treat remote agent output as untrusted.
 
 ## License
 
-MIT
+MIT License. Copyright (c) 2026 Zhafron Adani Kautsar.
 
 ## Continuity note
 
-This fork continues work from the original [`iamagenius00/hermes-a2a`](https://github.com/iamagenius00/hermes-a2a) repository, with additional profile-safety, installer, security, and webhook-routing hardening for multi-profile Hermes deployments.
+This fork continues work from [`iamagenius00/hermes-a2a`](https://github.com/iamagenius00/hermes-a2a), with additional profile isolation, native/background A2A support, installer lifecycle, security hardening, and live multi-profile verification.
