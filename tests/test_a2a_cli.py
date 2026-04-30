@@ -40,11 +40,11 @@ def test_cli_status_json_reports_profile_install_state(tmp_path):
     write_profile(profile, {"plugins": {"enabled": ["a2a"]}, "a2a": {"server": {"port": 41731}}})
     plugin_dir = profile / "plugins" / "a2a"
     plugin_dir.mkdir(parents=True)
-    (plugin_dir / "plugin.yaml").write_text('name: a2a\nversion: "0.3.2"\n', encoding="utf-8")
+    (plugin_dir / "plugin.yaml").write_text('name: a2a\nversion: "0.3.3"\n', encoding="utf-8")
     state_dir = profile / "a2a"
     state_dir.mkdir()
     (state_dir / "state.json").write_text(
-        json.dumps({"schema_version": 1, "installed_version": "0.3.2", "migration_version": "0.3.2"}),
+        json.dumps({"schema_version": 1, "installed_version": "0.3.3", "migration_version": "0.3.3"}),
         encoding="utf-8",
     )
 
@@ -54,8 +54,8 @@ def test_cli_status_json_reports_profile_install_state(tmp_path):
     payload = json.loads(result.stdout)
     assert payload["profile"]["home"] == str(profile.resolve())
     assert payload["installed"] is True
-    assert payload["plugin_version"] == "0.3.2"
-    assert payload["state"]["installed_version"] == "0.3.2"
+    assert payload["plugin_version"] == "0.3.3"
+    assert payload["state"]["installed_version"] == "0.3.3"
     assert payload["config"]["a2a_enabled"] is True
     assert payload["config"]["canonical"] is False
 
@@ -68,6 +68,46 @@ def test_cli_doctor_fails_closed_for_multiple_profiles_without_target(tmp_path):
 
     assert result.returncode != 0
     assert "multiple Hermes profiles" in result.stderr
+
+
+def test_plain_install_uses_discovery_flow_for_single_default_profile(tmp_path):
+    root = tmp_path / ".hermes"
+    write_profile(root)
+
+    result = run_cli(["install", "--dry-run", "--yes", "--json"], home=tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["mode"] == "multi-profile"
+    assert [profile["name"] for profile in payload["profiles"]] == ["default"]
+    assert payload["preview"] == ["default: agent=jono a2a=http://127.0.0.1:41731 wake_port=47644 wake_session=disabled connects_to=none"]
+
+
+def test_plain_install_uses_profile_discovery_flow_when_multiple_profiles(tmp_path):
+    root = tmp_path / ".hermes"
+    write_profile(root)
+    write_profile(root / "profiles" / "hermes_yanto_coder")
+
+    result = run_cli(["install", "--dry-run", "--yes", "--json"], home=tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["mode"] == "multi-profile"
+    assert [profile["name"] for profile in payload["profiles"]] == ["default", "hermes_yanto_coder"]
+    assert any("connects_to=yanto_coder" in item for item in payload["preview"])
+
+
+def test_plain_install_with_comma_profile_uses_multi_flow(tmp_path):
+    root = tmp_path / ".hermes"
+    write_profile(root)
+    write_profile(root / "profiles" / "hermes_yanto_coder")
+
+    result = run_cli(["install", "--profile", "default,hermes_yanto_coder", "--dry-run", "--yes", "--json"], home=tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["mode"] == "multi-profile"
+    assert [profile["name"] for profile in payload["profiles"]] == ["default", "hermes_yanto_coder"]
 
 
 def test_cli_install_dry_run_does_not_mutate_and_prints_plan(tmp_path):
@@ -98,9 +138,9 @@ def test_cli_install_writes_state_and_installs_plugin_without_restart(tmp_path):
     assert (profile / "plugins" / "a2a" / "plugin.yaml").exists()
     state = json.loads((profile / "a2a" / "state.json").read_text(encoding="utf-8"))
     assert state["schema_version"] == 1
-    assert state["installed_version"] == "0.3.2"
+    assert state["installed_version"] == "0.3.3"
     assert state["source"]["type"] == "local_checkout"
-    assert state["migration_version"] == "0.3.2"
+    assert state["migration_version"] == "0.3.3"
 
 
 def test_cli_update_moves_plugin_payload_backups_outside_plugin_discovery(tmp_path):

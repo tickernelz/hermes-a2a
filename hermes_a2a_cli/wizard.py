@@ -140,6 +140,7 @@ def collect_wizard_answers(
     prompt_fn: PromptFn,
     confirm_fn: ConfirmFn,
     local_agent_choices: list[dict[str, Any]] | None = None,
+    wake_defaults: dict[str, str] | None = None,
 ) -> WizardAnswers:
     name_default = "primary_agent" if profile_name == "default" else profile_name.replace("hermes_", "").replace("-", "_")
     identity_name = _ask(prompt_fn, "A2A agent name", name_default)
@@ -159,17 +160,22 @@ def collect_wizard_answers(
     wake_thread_id = ""
     wake_actor_id = ""
     wake_actor_name = "user"
-    if wake_enabled:
+    wake_defaults = wake_defaults or {}
+    if wake_enabled and wake_defaults.get("platform") and wake_defaults.get("chat_id"):
+        wake_platform = wake_defaults.get("platform", "")
+        wake_chat_id = wake_defaults.get("chat_id", "")
+        wake_chat_type = wake_defaults.get("chat_type", "dm") or "dm"
+        wake_thread_id = wake_defaults.get("thread_id", "")
+        wake_actor_id = wake_defaults.get("actor_id", "")
+        wake_actor_name = wake_defaults.get("actor_name", "user") or "user"
+    elif wake_enabled:
         wake_platform = _ask(prompt_fn, "Wake platform (discord/telegram/custom/none)", "discord")
         if wake_platform == "none":
             wake_platform = ""
         if wake_platform:
             wake_chat_id = _ask(prompt_fn, "Wake chat/channel ID", "")
-            wake_chat_type = _ask(prompt_fn, "Wake chat type", "group" if wake_platform == "discord" else "dm")
             if wake_platform == "telegram":
                 wake_thread_id = _ask(prompt_fn, "Telegram thread/topic ID (optional)", "")
-            wake_actor_id = _ask(prompt_fn, "Wake actor ID (your Discord/Telegram user ID; session selector, not auth)", wake_chat_id)
-            wake_actor_name = _ask(prompt_fn, "Wake actor name", "user")
     remote_agents: list[dict[str, Any]] = []
     if local_agent_choices:
         selection = _ask(prompt_fn, "Connect local A2A profiles (comma numbers/names, blank none)", "")

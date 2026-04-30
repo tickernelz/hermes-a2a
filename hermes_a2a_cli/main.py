@@ -333,14 +333,25 @@ def _prompt_multi_profile_selection(profiles: list[HermesProfile]) -> list[Herme
     return selected
 
 
+def _should_use_profile_discovery_install(args: argparse.Namespace) -> bool:
+    if args.multi:
+        return True
+    if args.profile:
+        return "," in args.profile
+    if args.hermes_home or os.environ.get("HERMES_HOME"):
+        return False
+    if not args.yes and not sys.stdin.isatty():
+        return False
+    return bool(discover_profiles(default_home().resolve()))
+
+
 def _wake_defaults_from_prompt(inferred: dict[str, str] | None = None) -> dict[str, str]:
     inferred = inferred or {}
     if inferred:
         print("Detected a recent Hermes gateway session for A2A wake routing:", file=sys.stderr)
         print(
             f"  platform={inferred.get('platform')} chat_id={inferred.get('chat_id')} "
-            f"thread_id={inferred.get('thread_id') or '-'} actor_id={inferred.get('actor_id')} "
-            f"actor_name={inferred.get('actor_name')}",
+            f"thread_id={inferred.get('thread_id') or '-'} actor={inferred.get('actor_name') or '-'}",
             file=sys.stderr,
         )
         if _confirm("Use this detected wake session", True):
@@ -348,38 +359,40 @@ def _wake_defaults_from_prompt(inferred: dict[str, str] | None = None) -> dict[s
     if not _confirm("Configure one shared wake session for selected profiles", True):
         return {}
     print("Wake session = where Hermes receives the internal A2A wake event.", file=sys.stderr)
-    print("chat/channel ID selects the room/thread; actor ID selects the Hermes session owner and is not auth/allowlist.", file=sys.stderr)
+    print("Only values stored in canonical config are requested here. Actor/user identity is derived from Hermes session history when available.", file=sys.stderr)
     platform = _prompt("Wake platform (discord/telegram/custom/none)", inferred.get("platform", "discord")).strip()
     if platform == "none":
         return {}
     defaults = {
         "platform": platform,
         "chat_id": _prompt("Wake chat/channel ID", inferred.get("chat_id", "")).strip(),
-        "chat_type": _prompt("Wake chat type", inferred.get("chat_type", "group" if platform == "discord" else "dm")).strip() or "dm",
-        "actor_id": _prompt("Wake actor ID (your Discord/Telegram user ID; session selector, not auth)", inferred.get("actor_id", "")).strip(),
-        "actor_name": _prompt("Wake actor name", inferred.get("actor_name", "user")).strip() or "user",
     }
     if platform == "telegram":
-        defaults["thread_id"] = _prompt("Telegram thread/topic ID (optional)", inferred.get("thread_id", "")).strip()
+        thread_id = _prompt("Telegram thread/topic ID (optional)", inferred.get("thread_id", "")).strip()
+        if thread_id:
+            defaults["thread_id"] = thread_id
     elif inferred.get("thread_id"):
         defaults["thread_id"] = inferred["thread_id"]
     return defaults
 
 
 def command_install(args: argparse.Namespace) -> int:
-    if args.multi:
+    if _should_use_profile_discovery_install(args):
         return command_install_multi(args)
     home = resolve_home(args)
     if not args.dry_run and not args.yes and not sys.stdin.isatty():
         raise CliError("Refusing destructive install in non-interactive mode without --yes")
     answers = None
     if not args.yes and sys.stdin.isatty():
+        inferred_wake = infer_wake_session_from_history(home)
+        wake_defaults = _wake_defaults_from_prompt(inferred_wake)
         answers = collect_wizard_answers(
             profile_name=profile_name_for_home(home),
             default_port=int(getattr(args, "a2a_port", None) or os.environ.get("A2A_PORT") or 41731),
             default_webhook_port=int(getattr(args, "webhook_port", None) or os.environ.get("WEBHOOK_PORT") or 47644),
             prompt_fn=_prompt,
             confirm_fn=_confirm,
+            wake_defaults=wake_defaults,
         )
     payload = install_payload(home, dry_run=args.dry_run, answers=answers)
     print_result(payload, args.json or True)

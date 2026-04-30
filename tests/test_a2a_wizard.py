@@ -52,7 +52,7 @@ def test_build_canonical_a2a_env_secret_store_uses_refs():
     assert a2a["wake"]["secret_env"] == "A2A_WEBHOOK_SECRET"
 
 
-def test_collect_wizard_answers_labels_actor_as_session_selector():
+def test_collect_wizard_answers_uses_detected_wake_defaults_without_actor_prompt():
     prompts = {
         "A2A agent name": "",
         "A2A agent description": "",
@@ -61,11 +61,6 @@ def test_collect_wizard_answers_labels_actor_as_session_selector():
         "A2A public URL": "",
         "Webhook wake port": "",
         "Secret store (config/env)": "",
-        "Wake platform (discord/telegram/custom/none)": "discord",
-        "Wake chat/channel ID": "chat-1",
-        "Wake chat type": "",
-        "Wake actor ID (your Discord/Telegram user ID; session selector, not auth)": "user-1",
-        "Wake actor name": "Owner",
     }
     seen_questions = []
 
@@ -82,11 +77,21 @@ def test_collect_wizard_answers_labels_actor_as_session_selector():
         default_webhook_port=47644,
         prompt_fn=prompt,
         confirm_fn=confirm,
+        wake_defaults={
+            "platform": "discord",
+            "chat_id": "chat-1",
+            "chat_type": "thread",
+            "thread_id": "thread-1",
+            "actor_id": "user-1",
+            "actor_name": "Owner",
+        },
     )
 
     assert answers.identity_name == "primary_agent"
+    assert answers.wake_chat_id == "chat-1"
     assert answers.wake_actor_id == "user-1"
-    assert "Wake actor ID (your Discord/Telegram user ID; session selector, not auth)" in seen_questions
+    assert not any("actor" in question.lower() for question in seen_questions)
+    assert "Wake chat/channel ID" not in seen_questions
 
 
 def test_collect_wizard_answers_can_select_local_a2a_agent():

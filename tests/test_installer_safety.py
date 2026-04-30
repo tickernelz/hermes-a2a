@@ -33,15 +33,16 @@ def run_script(script: str, args: list[str], *, home: Path, extra_env: dict[str,
     )
 
 
-def test_install_fails_closed_for_multiple_profiles_in_non_tty_without_target(tmp_path):
+def test_install_uses_multi_profile_discovery_without_target(tmp_path):
     write_profile(tmp_path / ".hermes")
     write_profile(tmp_path / ".hermes" / "profiles" / "reviewer")
 
-    result = run_script("install.sh", ["--dry-run"], home=tmp_path)
+    result = run_script("install.sh", ["--dry-run", "--yes", "--json"], home=tmp_path)
 
-    assert result.returncode != 0
-    assert "multiple Hermes profiles" in result.stderr
-    assert "--profile" in result.stderr
+    assert result.returncode == 0, result.stderr
+    assert '"mode": "multi-profile"' in result.stdout
+    assert '"name": "default"' in result.stdout
+    assert '"name": "reviewer"' in result.stdout
 
 
 def test_uninstall_fails_closed_for_multiple_profiles_in_non_tty_without_target(tmp_path):

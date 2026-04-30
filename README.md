@@ -73,7 +73,7 @@ Restart the target Hermes gateway after install. The installer intentionally doe
 ### Install a pinned CLI/source release
 
 ```bash
-HERMES_A2A_REF=v0.3.2 \
+HERMES_A2A_REF=v0.3.3 \
   curl -fsSL https://raw.githubusercontent.com/tickernelz/hermes-a2a/main/scripts/a2a.sh | bash
 ```
 
