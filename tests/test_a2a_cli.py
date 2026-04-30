@@ -111,3 +111,19 @@ def test_cli_native_install_delegates_to_new_manifest_flow(tmp_path):
     payload = json.loads(result.stdout)
     assert payload["dry_run"] is True
     assert payload["command"] == "install"
+
+
+def test_cli_has_no_legacy_shell_bridge():
+    assert not (ROOT / "scripts" / "install_legacy.sh").exists()
+    assert not (ROOT / "scripts" / "uninstall_legacy.sh").exists()
+    for path in [ROOT / "install.sh", ROOT / "uninstall.sh", ROOT / "hermes_a2a_cli" / "main.py"]:
+        assert "HERMES_A2A_LEGACY_WRAPPER" not in path.read_text(encoding="utf-8")
+        assert "install_legacy" not in path.read_text(encoding="utf-8")
+        assert "uninstall_legacy" not in path.read_text(encoding="utf-8")
+
+
+def test_shell_wrapper_checks_target_profile_python_before_system_python():
+    for script in [ROOT / "install.sh", ROOT / "uninstall.sh"]:
+        text = script.read_text(encoding="utf-8")
+        assert '"${HERMES_HOME:-}/hermes-agent/venv/bin/python"' in text
+        assert text.index('"${HERMES_HOME:-}/hermes-agent/venv/bin/python"') < text.index('PYTHON="$(command -v python3)"')

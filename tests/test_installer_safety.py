@@ -72,7 +72,7 @@ def test_install_preserves_existing_env_and_server_config_without_explicit_overr
         "A2A_PORT=49999\nA2A_PUBLIC_URL=http://127.0.0.1:49999\nA2A_AGENT_NAME=custom-agent\nA2A_REQUIRE_AUTH=false\n",
     )
 
-    result = run_script("install.sh", ["--hermes-home", str(profile)], home=tmp_path)
+    result = run_script("install.sh", ["--hermes-home", str(profile), "--yes"], home=tmp_path)
 
     assert result.returncode == 0, result.stderr + result.stdout
     env_text = (profile / ".env").read_text(encoding="utf-8")
@@ -96,7 +96,7 @@ def test_install_explicit_env_overrides_existing_values(tmp_path):
 
     result = run_script(
         "install.sh",
-        ["--hermes-home", str(profile)],
+        ["--hermes-home", str(profile), "--yes"],
         home=tmp_path,
         extra_env={
             "A2A_PORT": "45555",
@@ -122,7 +122,7 @@ def test_install_creates_dashboard_webhook_route(tmp_path):
     profile = tmp_path / ".hermes"
     write_profile(profile)
 
-    result = run_script("install.sh", ["--hermes-home", str(profile)], home=tmp_path)
+    result = run_script("install.sh", ["--hermes-home", str(profile), "--yes"], home=tmp_path)
 
     assert result.returncode == 0, result.stderr + result.stdout
     cfg = yaml.safe_load((profile / "config.yaml").read_text(encoding="utf-8"))

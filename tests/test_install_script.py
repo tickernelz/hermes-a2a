@@ -161,8 +161,8 @@ webhook:
     )
     (home / ".env").write_text("EXISTING=1\n", encoding="utf-8")
 
-    first = run_install(home)
-    second = run_install(home)
+    first = run_install(home, "--yes")
+    second = run_install(home, "--yes")
 
     assert first.returncode == 0, first.stderr
     assert second.returncode == 0, second.stderr
@@ -232,8 +232,8 @@ def test_install_auto_chooses_distinct_webhook_port_for_named_profile(tmp_path):
     (default_home / "config.yaml").write_text("plugins: {}\n", encoding="utf-8")
     (profile_home / "config.yaml").write_text("plugins: {}\n", encoding="utf-8")
 
-    default_result = run_install(default_home, WEBHOOK_PORT="", A2A_WEBHOOK_PORT="")
-    profile_result = run_install(None, "--profile", "reviewer", HOME=str(tmp_path), WEBHOOK_PORT="", A2A_WEBHOOK_PORT="")
+    default_result = run_install(default_home, "--yes", WEBHOOK_PORT="", A2A_WEBHOOK_PORT="")
+    profile_result = run_install(None, "--profile", "reviewer", "--yes", HOME=str(tmp_path), WEBHOOK_PORT="", A2A_WEBHOOK_PORT="")
 
     assert default_result.returncode == 0, default_result.stderr
     assert profile_result.returncode == 0, profile_result.stderr
@@ -262,7 +262,7 @@ platforms:
       port: 19191
 """.lstrip(), encoding="utf-8")
 
-    result = run_install(home, WEBHOOK_PORT="", A2A_WEBHOOK_PORT="")
+    result = run_install(home, "--yes", WEBHOOK_PORT="", A2A_WEBHOOK_PORT="")
 
     assert result.returncode == 0, result.stderr
     cfg = read_config(home)
@@ -289,7 +289,7 @@ def test_uninstall_is_profile_safe_and_supports_dry_run(tmp_path):
     assert dry.returncode == 0, dry.stderr
     assert plugin.exists()
 
-    result = run_uninstall(home)
+    result = run_uninstall(home, "--yes")
 
     assert result.returncode == 0, result.stderr
     assert not plugin.exists()

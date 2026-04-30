@@ -16,6 +16,7 @@ except Exception:
     yaml = None
 
 from . import __version__ as CLI_VERSION
+from .installer import InstallError, install_profile, uninstall_profile
 
 SCHEMA_VERSION = 1
 STATE_DIR_NAME = "a2a"
@@ -219,11 +220,11 @@ def install_payload(home: Path, *, dry_run: bool) -> dict[str, Any]:
     config_path = home / "config.yaml"
     load_yaml(config_path)
     plugin_source = repo_root() / "plugin"
-    if not plugin_source.is_dir():
-        raise CliError(f"plugin source not found: {plugin_source}")
+    dashboard_source = repo_root() / "dashboard"
     state_path = home / STATE_DIR_NAME / STATE_FILE_NAME
     version = source_plugin_version()
-    plan = ["install plugin payload", "update profile config/env through legacy-safe installer", "write profile state manifest", "no gateway restart"]
+    plan = ["install plugin payload", "update profile config/env", "write profile state manifest", "no gateway restart"]
+    result = install_profile(home, plugin_source, dashboard_source, dry_run=dry_run)
     if dry_run:
         return {
             "command": "install",
@@ -232,6 +233,7 @@ def install_payload(home: Path, *, dry_run: bool) -> dict[str, Any]:
             "restart_required": True,
             "profile": profile_payload(home),
             "plan": plan,
+            "messages": result["messages"],
         }
     stamp = time.strftime("%Y%m%d%H%M%S")
     backup_root = home / STATE_DIR_NAME / "backups" / stamp
@@ -239,38 +241,13 @@ def install_payload(home: Path, *, dry_run: bool) -> dict[str, Any]:
     target = backup_path(state_path, backup_root)
     if target is not None:
         backed_up.append(str(target))
-    env = os.environ.copy()
-    env["PYTHONPATH"] = str(repo_root()) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
-    result = subprocess.run(
-        ["bash", str(repo_root() / "scripts" / "install_legacy.sh"), "--hermes-home", str(home)],
-        cwd=repo_root(),
-        env=env,
-        text=True,
-        capture_output=True,
-        timeout=60,
-        check=False,
-    )
-    if result.returncode != 0:
-        raise CliError((result.stderr or result.stdout or "legacy installer failed").strip())
     state = {
         "schema_version": SCHEMA_VERSION,
         "installed_version": version,
-        "source": {
-            "type": "local_checkout",
-            "path": str(repo_root()),
-            "commit": git_commit(),
-        },
+        "source": {"type": "local_checkout", "path": str(repo_root()), "commit": git_commit()},
         "migration_version": version,
         "last_backup": stamp if backed_up else None,
-        "migration_ledger": [
-            {
-                "id": f"install_{version.replace('.', '_')}",
-                "from": None,
-                "to": version,
-                "status": "success",
-                "backup_id": stamp if backed_up else None,
-            }
-        ],
+        "migration_ledger": [{"id": f"install_{version.replace('.', '_')}", "from": None, "to": version, "status": "success", "backup_id": stamp if backed_up else None}],
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     write_json(state_path, state)
@@ -283,6 +260,7 @@ def install_payload(home: Path, *, dry_run: bool) -> dict[str, Any]:
         "plan": plan,
         "state_path": str(state_path),
         "backup_id": stamp if backed_up else None,
+        "messages": result["messages"],
     }
 
 
@@ -307,25 +285,7 @@ def command_doctor(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
-def run_legacy_script(script_name: str, args: argparse.Namespace) -> int:
-    script = repo_root() / "scripts" / script_name
-    argv: list[str] = []
-    if getattr(args, "dry_run", False):
-        argv.append("--dry-run")
-    if getattr(args, "profile", None):
-        argv.extend(["--profile", args.profile])
-    if getattr(args, "hermes_home", None):
-        argv.extend(["--hermes-home", args.hermes_home])
-    env = os.environ.copy()
-    env["PYTHONPATH"] = str(repo_root()) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
-    result = subprocess.run(["bash", str(script), *argv], cwd=repo_root(), env=env)
-    return result.returncode
-
-
 def command_install(args: argparse.Namespace) -> int:
-    legacy_wrapper = os.environ.get("HERMES_A2A_LEGACY_WRAPPER") == "1"
-    if legacy_wrapper and not args.json and not args.yes:
-        return run_legacy_script("install_legacy.sh", args)
     home = resolve_home(args)
     if not args.dry_run and not args.yes and not sys.stdin.isatty():
         raise CliError("Refusing destructive install in non-interactive mode without --yes")
@@ -339,23 +299,19 @@ def command_update(args: argparse.Namespace) -> int:
 
 
 def command_uninstall(args: argparse.Namespace) -> int:
-    legacy_wrapper = os.environ.get("HERMES_A2A_LEGACY_WRAPPER") == "1"
-    if legacy_wrapper and not args.json and not args.yes:
-        return run_legacy_script("uninstall_legacy.sh", args)
     home = resolve_home(args)
     if not (home / "config.yaml").exists():
         raise CliError(f"Refusing to uninstall: {home / 'config.yaml'} not found")
-    plugin_dir = home / "plugins" / "a2a"
     plan = ["remove plugin payload", "preserve config/env/state", "no gateway restart"]
     if args.dry_run:
-        payload = {"command": "uninstall", "dry_run": True, "changed": False, "profile": profile_payload(home), "plugin_dir": str(plugin_dir), "plan": plan}
+        result = uninstall_profile(home, dry_run=True)
+        payload = {"command": "uninstall", "dry_run": True, "changed": False, "profile": profile_payload(home), "plugin_dir": result["plugin_dir"], "plan": plan, "messages": result["messages"]}
         print_result(payload, args.json or True)
         return 0
     if not args.yes and not sys.stdin.isatty():
         raise CliError("Refusing destructive uninstall in non-interactive mode without --yes")
-    if plugin_dir.exists():
-        shutil.rmtree(plugin_dir)
-    payload = {"command": "uninstall", "dry_run": False, "changed": True, "profile": profile_payload(home), "plugin_dir": str(plugin_dir), "plan": plan, "restart_required": True}
+    result = uninstall_profile(home, dry_run=False)
+    payload = {"command": "uninstall", "dry_run": False, "changed": result["changed"], "profile": profile_payload(home), "plugin_dir": result["plugin_dir"], "plan": plan, "restart_required": True, "messages": result["messages"]}
     print_result(payload, args.json or True)
     return 0
 
@@ -389,7 +345,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return args.func(args)
-    except CliError as exc:
+    except (CliError, InstallError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
 

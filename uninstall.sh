@@ -7,6 +7,8 @@ if [ -z "$PYTHON" ]; then
   for candidate in \
     "$SCRIPT_DIR/.venv/bin/python" \
     "$SCRIPT_DIR/venv/bin/python" \
+    "${HERMES_HOME:-}/hermes-agent/venv/bin/python" \
+    "${HERMES_HOME:-}/hermes-agent/.venv/bin/python" \
     "$HOME/.hermes/hermes-agent/venv/bin/python" \
     "$HOME/.hermes/hermes-agent/.venv/bin/python"; do
     if [ -x "$candidate" ]; then
@@ -20,5 +22,4 @@ if [ -z "$PYTHON" ]; then
 fi
 
 export PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}"
-export HERMES_A2A_LEGACY_WRAPPER=1
 exec "$PYTHON" -m hermes_a2a_cli uninstall "$@"
