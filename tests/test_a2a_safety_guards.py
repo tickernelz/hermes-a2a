@@ -87,7 +87,7 @@ def test_gateway_dispatch_activates_requested_task_id(monkeypatch):
     a2a_plugin._active_a2a_tasks.clear()
 
 
-def test_gateway_dispatch_falls_back_to_queue_when_requested_task_missing(monkeypatch):
+def test_gateway_dispatch_skips_stale_requested_task_id(monkeypatch):
     task = MagicMock()
     task.task_id = "task-1"
     task.text = "hello"
@@ -101,11 +101,26 @@ def test_gateway_dispatch_falls_back_to_queue_when_requested_task_missing(monkey
     event = SimpleNamespace(text="[A2A trigger]", raw_message={"task_id": "missing-task"})
     result = a2a_plugin._on_pre_gateway_dispatch(event)
 
-    assert result["action"] == "rewrite"
-    assert "task:task-1" in result["text"]
-    assert list(a2a_plugin._active_a2a_tasks) == ["task-1"]
-    fake_queue.mark_processing.assert_called_once_with("task-1")
+    assert result["action"] == "skip"
+    assert "not pending" in result["reason"]
+    fake_queue.drain_pending.assert_not_called()
+    fake_queue.mark_processing.assert_not_called()
+    assert a2a_plugin._active_a2a_tasks == {}
+
+
+def test_gateway_dispatch_skips_empty_trigger_when_queue_empty(monkeypatch):
+    fake_queue = MagicMock()
+    fake_queue.drain_pending.return_value = []
+    monkeypatch.setattr(a2a_plugin.a2a_server, "task_queue", fake_queue)
     a2a_plugin._active_a2a_tasks.clear()
+
+    event = SimpleNamespace(text="[A2A trigger]")
+    result = a2a_plugin._on_pre_gateway_dispatch(event)
+
+    assert result["action"] == "skip"
+    assert "without pending task" in result["reason"]
+    fake_queue.mark_processing.assert_not_called()
+    assert a2a_plugin._active_a2a_tasks == {}
 
 
 def test_gateway_dispatch_ignores_raw_webhook_text(monkeypatch):

@@ -213,9 +213,9 @@ A2A_WEBHOOK_SECRET=<shared-webhook-secret>
 
 ## Native A2A compatibility
 
-The plugin accepts both legacy JSON-RPC task methods (`tasks/send`, `tasks/get`, `tasks/cancel`) and native A2A JSON-RPC methods (`SendMessage`, `GetTask`, `CancelTask`). It also accepts `message/send` as a compatibility alias for earlier draft clients. Legacy callers keep the legacy result shape. Native-style callers receive a direct A2A Task result with `kind: "task"`, `contextId`, lowercase A2A task states, `status.message.parts`, and `artifacts[].artifactId`.
+The plugin accepts both legacy JSON-RPC task methods (`tasks/send`, `tasks/get`, `tasks/cancel`) and native A2A JSON-RPC methods (`SendMessage`, `GetTask`, `CancelTask`). It also accepts `message/send` as a compatibility alias for earlier draft clients. Legacy callers keep the legacy result shape. Native callers receive a spec-shaped JSON-RPC result wrapper such as `{ "task": { ... } }` or `{ "message": { ... } }`; the contained Task uses `kind: "task"`, `contextId`, lowercase A2A task states, `status.message.parts`, and `artifacts[].artifactId`.
 
-Outbound calls discover the remote agent card first. Agents that advertise JSON-RPC v0.3+ support receive `SendMessage`/`GetTask` with `kind` parts; older or unknown agents fall back to `tasks/send`/`tasks/get`. Authenticated outbound HTTP blocks redirects so bearer tokens are not forwarded to another origin.
+Outbound calls discover the remote agent card first. Agents that advertise JSON-RPC v0.3+ support receive `SendMessage`/`GetTask` with `kind` parts; older or unknown agents fall back to `tasks/send`/`tasks/get`. Authenticated outbound HTTP blocks redirects so bearer tokens are not forwarded to another origin. Native background calls can include `configuration.pushNotificationConfig` when a trusted callback URL is explicitly provided; otherwise background mode remains poll-first through `a2a_get`.
 
 Inbound message parts are normalized into a safe Hermes prompt. Text and JSON/data parts are rendered as text. File, image, audio, video, URL, and raw/blob parts are represented as attachment references with sanitized filename, MIME type, size, checksum, and URL origin. Remote attachment URLs are not fetched automatically; only `http` and `https` references are accepted. Full URLs remain in structured metadata for tools/audit, but only the origin is shown in the model prompt to reduce prompt-injection surface. Inline raw content is never injected into the prompt and is capped by `a2a.security.max_raw_part_bytes`.
 
@@ -238,7 +238,7 @@ From Hermes, use:
 - `a2a_get` to poll a background task later
 - `a2a_cancel` to request cancellation when the remote supports it
 
-Background calls persist a profile-local task record in `a2a_tasks.json` before the HTTP POST. If the remote returns `working`/`submitted`, the tool returns immediately instead of polling; final state can be retrieved with `a2a_get` or updated through authenticated `tasks/notify` / `TaskNotification`. Terminal task states are immutable, so late duplicate notifications cannot overwrite a completed, failed, or canceled result.
+Background calls persist a profile-local task record in `a2a_tasks.json` before the HTTP POST. If the remote returns `working`/`submitted`, the tool returns immediately instead of polling; final state can be retrieved with `a2a_get`, through Hermes compatibility notifications (`tasks/notify` / `TaskNotification`), or through authenticated native push payloads (`task`, `message`, `statusUpdate`, `artifactUpdate`) when a push callback was explicitly configured. Terminal task states are immutable, so late duplicate notifications cannot overwrite a completed, failed, or canceled result.
 
 A raw A2A JSON-RPC call looks like this:
 
@@ -284,7 +284,7 @@ curl -X POST http://127.0.0.1:41731 \
 | Input validation | JSON-RPC and A2A task payloads are validated before queueing. |
 | Queue lifecycle | Tasks move through submitted, working, completed, failed, canceled, rejected, or expired states. Terminal states are immutable. |
 | Background tasks | Long-running outbound work persists profile-local task records and can be polled or completed through authenticated notifications. |
-| Webhook wake | Signed wake request routes by `task_id`; raw webhook text is ignored as content. |
+| Webhook wake | Signed wake request routes by `task_id`; raw webhook text is ignored as content, and empty/stale triggers are dropped instead of reaching Discord/LLM. |
 | Persistence | Writes are profile-local, atomic, capped, and redacted where appropriate. |
 | Request/body limits | Oversized HTTP bodies and oversized message text are rejected or truncated before agent execution. |
 | Rate limit | Inbound requests are rate-limited per remote address to prevent retry storms and loops. |

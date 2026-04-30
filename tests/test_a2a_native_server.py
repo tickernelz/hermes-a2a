@@ -69,13 +69,15 @@ def test_message_send_accepts_native_shape_and_returns_native_task(monkeypatch):
     data = read_response(handler)
 
     assert sent["status"] == 200
-    assert data["result"]["kind"] == "task"
-    assert data["result"]["id"] == "task-native"
-    assert data["result"]["contextId"] == "ctx-1"
-    assert data["result"]["status"]["state"] == "completed"
-    assert data["result"]["status"]["message"]["parts"][0] == {"kind": "text", "text": "native response"}
-    assert data["result"]["artifacts"][0]["artifactId"] == "task-native-artifact-0"
-    assert data["result"]["artifacts"][0]["parts"][0] == {"kind": "text", "text": "native response"}
+    assert "kind" not in data["result"]
+    task = data["result"]["task"]
+    assert task["kind"] == "task"
+    assert task["id"] == "task-native"
+    assert task["contextId"] == "ctx-1"
+    assert task["status"]["state"] == "completed"
+    assert task["status"]["message"]["parts"][0] == {"kind": "text", "text": "native response"}
+    assert task["artifacts"][0]["artifactId"] == "task-native-artifact-0"
+    assert task["artifacts"][0]["parts"][0] == {"kind": "text", "text": "native response"}
 
 
 def test_sendmessage_alias_accepts_native_shape(monkeypatch):
@@ -89,7 +91,7 @@ def test_sendmessage_alias_accepts_native_shape(monkeypatch):
     handler.do_POST()
     data = read_response(handler)
 
-    assert data["result"]["id"] == "task-alias"
+    assert data["result"]["task"]["id"] == "task-alias"
 
 
 def test_tasks_send_legacy_shape_is_preserved(monkeypatch):
@@ -120,10 +122,12 @@ def test_gettask_returns_native_task_shape(monkeypatch):
     handler.do_POST()
     data = read_response(handler)
 
-    assert data["result"]["kind"] == "task"
-    assert data["result"]["id"] == "task-1"
-    assert data["result"]["contextId"] == "task-1"
-    assert data["result"]["status"]["state"] == "completed"
+    assert "kind" not in data["result"]
+    task = data["result"]["task"]
+    assert task["kind"] == "task"
+    assert task["id"] == "task-1"
+    assert task["contextId"] == "task-1"
+    assert task["status"]["state"] == "completed"
 
 
 def test_tasks_get_legacy_shape_is_preserved(monkeypatch):
@@ -197,7 +201,7 @@ def test_non_text_only_attachment_is_not_treated_as_empty(monkeypatch):
     handler.do_POST()
     data = read_response(handler)
 
-    assert data["result"]["status"]["state"] == "completed"
+    assert data["result"]["task"]["status"]["state"] == "completed"
 
 
 def test_empty_parts_fails_cleanly(monkeypatch):
@@ -207,8 +211,8 @@ def test_empty_parts_fails_cleanly(monkeypatch):
     handler.do_POST()
     data = read_response(handler)
 
-    assert data["result"]["status"]["state"] == "failed"
-    assert "Empty message" in data["result"]["artifacts"][0]["parts"][0]["text"]
+    assert data["result"]["task"]["status"]["state"] == "failed"
+    assert "Empty message" in data["result"]["task"]["artifacts"][0]["parts"][0]["text"]
 
 
 def test_gettask_missing_id_returns_invalid_params(monkeypatch):
@@ -247,8 +251,9 @@ def test_response_is_truncated_by_max_response_chars(monkeypatch):
     handler.do_POST()
     data = read_response(handler)
 
-    assert data["result"]["status"]["message"]["parts"][0]["text"].startswith("nat")
-    assert "truncated by A2A max_response_chars" in data["result"]["status"]["message"]["parts"][0]["text"]
+    text = data["result"]["task"]["status"]["message"]["parts"][0]["text"]
+    assert text.startswith("nat")
+    assert "truncated by A2A max_response_chars" in text
 
 
 def test_canceltask_returns_native_task_shape(monkeypatch):
@@ -260,9 +265,11 @@ def test_canceltask_returns_native_task_shape(monkeypatch):
     handler.do_POST()
     data = read_response(handler)
 
-    assert data["result"]["kind"] == "task"
-    assert data["result"]["id"] == "task-cancel"
-    assert data["result"]["status"]["state"] == "canceled"
+    assert "kind" not in data["result"]
+    task = data["result"]["task"]
+    assert task["kind"] == "task"
+    assert task["id"] == "task-cancel"
+    assert task["status"]["state"] == "canceled"
 
 
 def test_gettask_cached_response_is_truncated_by_max_response_chars(monkeypatch):
@@ -277,7 +284,7 @@ def test_gettask_cached_response_is_truncated_by_max_response_chars(monkeypatch)
     handler.do_POST()
     data = read_response(handler)
 
-    text = data["result"]["status"]["message"]["parts"][0]["text"]
+    text = data["result"]["task"]["status"]["message"]["parts"][0]["text"]
     assert text.startswith("abcd")
     assert "truncated by A2A max_response_chars" in text
 
@@ -310,8 +317,8 @@ def test_background_send_returns_submitted_without_waiting(monkeypatch, tmp_path
     data = read_response(handler)
 
     assert waited["called"] is False
-    assert data["result"]["id"] == "background-1"
-    assert data["result"]["status"]["state"] == "submitted"
+    assert data["result"]["task"]["id"] == "background-1"
+    assert data["result"]["task"]["status"]["state"] == "submitted"
     assert queue.get_status("background-1")["state"] == "submitted"
 
 
@@ -346,8 +353,8 @@ def test_duplicate_background_task_returns_existing_status(monkeypatch, tmp_path
     handler.do_POST()
     data = read_response(handler)
 
-    assert data["result"]["id"] == "dup-task"
-    assert data["result"]["status"]["state"] in {"submitted", "working"}
+    assert data["result"]["task"]["id"] == "dup-task"
+    assert data["result"]["task"]["status"]["state"] in {"submitted", "working"}
     assert queue.pending_count() == 1
 
 

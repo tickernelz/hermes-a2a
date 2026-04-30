@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import secrets
 import threading
 import time
 import uuid
@@ -293,6 +294,20 @@ def _headers(auth_token: str) -> dict:
     return {"Authorization": f"Bearer {auth_token}"} if auth_token else {}
 
 
+def _validate_notify_url(value: Any) -> str:
+    url = str(value or "").strip()
+    if not url:
+        return ""
+    from urllib.parse import urlparse
+    try:
+        parsed = urlparse(url)
+    except ValueError as exc:
+        raise ValueError("notify_url must be an http(s) URL") from exc
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("notify_url must be an http(s) URL")
+    return url
+
+
 def _outbound_record_state(state: str, background: bool) -> str:
     normalized = normalize_state(state)
     if background and normalized in {"working", "submitted", "unknown"}:
@@ -351,7 +366,8 @@ def handle_call(args: dict, **kwargs) -> str:
     intent = args.get("intent", "consultation")
     expected_action = args.get("expected_action", "reply")
     background = bool(args.get("background"))
-    notify = bool(args.get("notify", background))
+    explicit_notify = "notify" in args
+    notify = bool(args.get("notify", False))
 
     if not message:
         return _err("'message' is required")
@@ -395,9 +411,17 @@ def handle_call(args: dict, **kwargs) -> str:
         message_body["messageId"] = task_id
         message_body["contextId"] = args.get("context_id") or task_id
 
-    message_body["metadata"].update({"background": background, "notify": notify})
+    notify_url = ""
     if args.get("notify_url"):
-        message_body["metadata"]["callback_url"] = str(args.get("notify_url"))
+        if explicit_notify and not notify:
+            return _err("notify_url requires notify=true")
+        try:
+            notify_url = _validate_notify_url(args.get("notify_url"))
+        except ValueError as exc:
+            return _err(str(exc))
+        notify = True
+        message_body["metadata"]["callback_url"] = notify_url
+    message_body["metadata"].update({"background": background, "notify": notify})
 
     payload = {
         "jsonrpc": "2.0",
@@ -410,6 +434,17 @@ def handle_call(args: dict, **kwargs) -> str:
             "message": message_body,
         },
     }
+    push_token = ""
+    push_requested = bool(native and background and notify and notify_url)
+    if push_requested:
+        push_token = secrets.token_urlsafe(32)
+        payload["params"]["configuration"] = {
+            "pushNotificationConfig": {
+                "url": notify_url,
+                "token": push_token,
+                "authentication": {"schemes": ["Bearer"]},
+            }
+        }
 
     if background:
         task_store.create_task(
@@ -420,7 +455,8 @@ def handle_call(args: dict, **kwargs) -> str:
             state="submitted",
             context_id=str(args.get("context_id") or task_id),
             local_task_id=task_id,
-            notify_requested=notify,
+            notify_requested=push_requested,
+            push_token=push_token,
         )
 
     audit.log("call_outbound", {"target": url, "task_id": task_id, "length": len(message), "background": background})

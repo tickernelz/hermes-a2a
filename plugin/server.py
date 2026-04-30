@@ -33,6 +33,7 @@ from .protocol import (
     method_kind,
     normalize_inbound_message,
     transition_state,
+    wrap_native_rpc_result,
 )
 from . import task_store
 from .security import RateLimiter, audit, filter_outbound, sanitize_inbound
@@ -354,13 +355,16 @@ class A2ARequestHandler(BaseHTTPRequestHandler):
             if allowed:
                 logger.warning(
                     "[A2A] Allowing unauthenticated localhost request; set "
-                    "A2A_AUTH_TOKEN and A2A_REQUIRE_AUTH=true"
+                    "A2A_AUTH_TOKEN and A2A_REQUIRE_AUTH=true in production"
                 )
             return allowed
         auth_header = self.headers.get("Authorization", "")
         if not auth_header.startswith("Bearer "):
             return False
         return hmac.compare_digest(auth_header[7:].strip(), token)
+
+    def _is_native_push_payload(self, body: Any) -> bool:
+        return isinstance(body, dict) and any(key in body for key in ("task", "message", "statusUpdate", "artifactUpdate"))
 
     def do_GET(self) -> None:
         if self.path == "/.well-known/agent.json":
@@ -375,12 +379,7 @@ class A2ARequestHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "Not found"}, 404)
 
     def do_POST(self) -> None:
-        if not self._check_auth():
-            self._send_json(
-                {"jsonrpc": "2.0", "error": {"code": -32000, "message": "Unauthorized"}, "id": None},
-                401,
-            )
-            return
+        bearer_auth_ok = self._check_auth()
 
         if not self.server.limiter.allow(self.client_address[0]):
             audit.log("rate_limited", {"client": self.client_address[0]})
@@ -417,6 +416,19 @@ class A2ARequestHandler(BaseHTTPRequestHandler):
 
         if not isinstance(body, dict):
             self._send_json({"jsonrpc": "2.0", "error": {"code": -32600, "message": "Invalid Request"}, "id": None}, 400)
+            return
+
+        is_native_push = self._is_native_push_payload(body)
+        if not bearer_auth_ok and not is_native_push:
+            self._send_json(
+                {"jsonrpc": "2.0", "error": {"code": -32000, "message": "Unauthorized"}, "id": None},
+                401,
+            )
+            return
+
+        if is_native_push:
+            status, result = self._handle_native_push_payload(body)
+            self._send_json(result, status)
             return
 
         method = body.get("method", "")
@@ -467,6 +479,8 @@ class A2ARequestHandler(BaseHTTPRequestHandler):
             })
             return
 
+        if native and kind in {"send", "get", "cancel"}:
+            result = wrap_native_rpc_result(result)
         self._send_json({"jsonrpc": "2.0", "result": result, "id": rpc_id})
 
     def _task_id_from_params(self, params: dict, message: dict) -> str:
@@ -570,15 +584,77 @@ class A2ARequestHandler(BaseHTTPRequestHandler):
             return None
         text = truncate_response_text(filter_outbound(_notify_text(params)), self.server.max_response_chars)
         state = _notify_state(params)
+        updated = self._update_background_record(record, state=state, text=text, agent_name=agent_name)
+        return build_task_result(updated["task_id"], updated.get("state", state), updated.get("response", text), native=native, context_id=updated.get("context_id") or updated["task_id"])
+
+    def _update_background_record(self, record: dict, *, state: str, text: str, agent_name: str = "") -> dict:
+        old_state = str(record.get("state") or "")
         updated = task_store.update_task(record["task_id"], state=state, response=text) or record
-        if updated.get("state") == state:
+        if updated.get("state") != old_state or (text and updated.get("response") == text and not old_state):
             try:
                 from .persistence import update_exchange
-                update_exchange(agent_name=updated.get("agent_name") or agent_name or "remote", task_id=updated["task_id"], inbound_text=text)
+                update_exchange(agent_name=updated.get("agent_name") or agent_name or "remote", task_id=updated["task_id"], inbound_text=updated.get("response", text))
             except Exception:
                 logger.debug("[A2A] Failed to update notified exchange", exc_info=True)
             threading.Thread(target=_trigger_webhook, args=(updated["task_id"],), daemon=True).start()
-        return build_task_result(updated["task_id"], updated.get("state", state), updated.get("response", text), native=native, context_id=updated.get("context_id") or updated["task_id"])
+        return updated
+
+    def _native_push_task_id(self, payload: dict) -> str:
+        if isinstance(payload.get("task"), dict):
+            return _safe_id(payload["task"].get("id") or payload["task"].get("taskId"), fallback="")
+        if isinstance(payload.get("statusUpdate"), dict):
+            return _safe_id(payload["statusUpdate"].get("taskId") or payload["statusUpdate"].get("id"), fallback="")
+        if isinstance(payload.get("artifactUpdate"), dict):
+            return _safe_id(payload["artifactUpdate"].get("taskId") or payload["artifactUpdate"].get("id"), fallback="")
+        if isinstance(payload.get("message"), dict):
+            return _safe_id(payload["message"].get("taskId") or payload["message"].get("task_id") or payload["message"].get("id"), fallback="")
+        return ""
+
+    def _native_push_state(self, payload: dict) -> str:
+        if isinstance(payload.get("task"), dict):
+            return extract_task_state(payload["task"])
+        if isinstance(payload.get("statusUpdate"), dict):
+            status = payload["statusUpdate"].get("status", {})
+            return extract_task_state({"status": status}) if isinstance(status, dict) else "completed"
+        if isinstance(payload.get("artifactUpdate"), dict):
+            return "working"
+        if isinstance(payload.get("message"), dict):
+            return "working"
+        return "working"
+
+    def _native_push_text(self, payload: dict) -> str:
+        if isinstance(payload.get("task"), dict):
+            return extract_response_text(payload["task"])
+        if isinstance(payload.get("message"), dict):
+            return extract_response_text({"message": payload["message"]})
+        if isinstance(payload.get("statusUpdate"), dict):
+            update = payload["statusUpdate"]
+            status = update.get("status", {}) if isinstance(update, dict) else {}
+            return extract_response_text({"status": status})
+        if isinstance(payload.get("artifactUpdate"), dict):
+            artifact = payload["artifactUpdate"].get("artifact", {})
+            return extract_response_text({"artifacts": [artifact]}) if isinstance(artifact, dict) else ""
+        return ""
+
+    def _handle_native_push_payload(self, payload: dict) -> tuple[int, dict]:
+        raw_tid = self._native_push_task_id(payload)
+        if not raw_tid:
+            return 404, {"error": "Task not found"}
+        record = task_store.find_task(raw_tid)
+        if not record:
+            return 404, {"error": "Task not found"}
+        if record.get("direction") != "outbound" or not record.get("notify_requested"):
+            return 404, {"error": "Task not found"}
+        expected_token = str(record.get("push_token") or "").strip()
+        if not expected_token:
+            return 401, {"error": {"message": "Unauthorized"}}
+        supplied_token = str(self.headers.get("X-A2A-Notification-Token", "")).strip()
+        if not hmac.compare_digest(supplied_token, expected_token):
+            return 401, {"error": {"message": "Unauthorized"}}
+        text = truncate_response_text(filter_outbound(self._native_push_text(payload)), self.server.max_response_chars)
+        state = self._native_push_state(payload)
+        updated = self._update_background_record(record, state=state, text=text, agent_name=str(record.get("agent_name") or ""))
+        return 200, {"status": "ok", "task_id": updated["task_id"], "state": updated.get("state", state)}
 
 
 class A2AServer(ThreadingHTTPServer):

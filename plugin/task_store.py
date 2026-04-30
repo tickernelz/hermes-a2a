@@ -61,6 +61,7 @@ def create_task(
     remote_task_id: str = "",
     notify_requested: bool = False,
     response: str = "",
+    push_token: str = "",
 ) -> dict[str, Any]:
     now = _now()
     record = {
@@ -77,6 +78,8 @@ def create_task(
         "notify_requested": bool(notify_requested),
         "response": filter_outbound(response or ""),
     }
+    if push_token:
+        record["push_token"] = _clean(push_token)
     with _lock:
         tasks = _load()
         existing = tasks.get(record["task_id"])
@@ -105,7 +108,7 @@ def update_task(task_id: str, **changes: Any) -> dict[str, Any] | None:
             tasks[key] = record
             _save(tasks)
             return record
-        for field in ("agent_name", "url", "context_id", "local_task_id", "remote_task_id"):
+        for field in ("agent_name", "url", "context_id", "local_task_id", "remote_task_id", "push_token"):
             if field in changes and changes[field] not in (None, ""):
                 record[field] = _clean(changes[field])
         if "notify_requested" in changes:

@@ -280,12 +280,13 @@ def _on_pre_gateway_dispatch(event=None, **kwargs):
     if requested_task_id:
         task = a2a_server._get_pending_task(a2a_server.task_queue, requested_task_id)
         if not task:
-            logger.debug("[A2A] Requested webhook task %s is not pending; falling back to queue", requested_task_id)
+            logger.debug("[A2A] Dropping stale A2A trigger for task %s", requested_task_id)
+            return {"action": "skip", "reason": "A2A requested task is not pending"}
 
     if task is None:
         pending = a2a_server.task_queue.drain_pending(exclude=exclude)
         if not pending:
-            return None
+            return {"action": "skip", "reason": "A2A trigger without pending task"}
         task = pending[0]
 
     if not _activate_task_if_idle(task):

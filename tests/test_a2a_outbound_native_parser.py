@@ -322,6 +322,132 @@ def test_handle_call_background_completed_immediately_returns_completed(monkeypa
     assert result["response"] == "done"
 
 
+
+def test_native_background_call_sends_push_notification_config(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    captured = {}
+
+    def fake_http(method, url, json_body=None, headers=None):
+        if method == "GET":
+            return {"preferredTransport": "JSONRPC", "protocolVersion": "0.3.0", "capabilities": {"pushNotifications": True}}
+        captured["payload"] = json_body
+        return {"result": {"task": {"id": "remote-bg", "contextId": "ctx", "status": {"state": "submitted"}}}}
+
+    monkeypatch.setattr(tools, "_resolve_target", lambda name, url: ("http://agent.local", "secret"))
+    monkeypatch.setattr(tools, "_consume_rate_limit", lambda: True)
+    monkeypatch.setattr(tools, "_http_request", fake_http)
+    monkeypatch.setattr(tools, "get_security_config", lambda: type("Cfg", (), {"max_parts": 20, "max_raw_part_bytes": 262_144, "max_request_bytes": 1_048_576})())
+    monkeypatch.setattr("plugin.persistence.save_exchange", lambda **kwargs: None)
+
+    result = json.loads(tools.handle_call({
+        "url": "http://agent.local",
+        "message": "slow task",
+        "task_id": "local-bg",
+        "background": True,
+        "notify": True,
+        "notify_url": "https://client.example.test/a2a-notify",
+    }))
+
+    config = captured["payload"]["params"]["configuration"]["pushNotificationConfig"]
+    assert config["url"] == "https://client.example.test/a2a-notify"
+    assert config["authentication"]["schemes"] == ["Bearer"]
+    assert captured["payload"]["params"]["message"]["metadata"]["notify"] is True
+    assert result["background"] is True
+
+
+def test_native_background_call_rejects_unsafe_notify_url(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    called = {"post": False}
+
+    def fake_http(method, url, json_body=None, headers=None):
+        if method == "GET":
+            return {"preferredTransport": "JSONRPC", "protocolVersion": "0.3.0", "capabilities": {"pushNotifications": True}}
+        called["post"] = True
+        return {}
+
+    monkeypatch.setattr(tools, "_resolve_target", lambda name, url: ("http://agent.local", "secret"))
+    monkeypatch.setattr(tools, "_consume_rate_limit", lambda: True)
+    monkeypatch.setattr(tools, "_http_request", fake_http)
+    monkeypatch.setattr(tools, "get_security_config", lambda: type("Cfg", (), {"max_parts": 20, "max_raw_part_bytes": 262_144, "max_request_bytes": 1_048_576})())
+
+    result = json.loads(tools.handle_call({
+        "url": "http://agent.local",
+        "message": "slow task",
+        "task_id": "local-bg",
+        "background": True,
+        "notify": True,
+        "notify_url": "file:///tmp/a2a",
+    }))
+
+    assert "error" in result
+    assert "notify_url" in result["error"]
+    assert called["post"] is False
+
+
+def test_native_background_push_config_generates_and_persists_per_task_token(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    captured = {}
+
+    def fake_http(method, url, json_body=None, headers=None):
+        if method == "GET":
+            return {"preferredTransport": "JSONRPC", "protocolVersion": "0.3.0", "capabilities": {"pushNotifications": True}}
+        captured["payload"] = json_body
+        return {"result": {"task": {"id": "remote-bg", "contextId": "ctx", "status": {"state": "submitted"}}}}
+
+    monkeypatch.setattr(tools, "_resolve_target", lambda name, url: ("http://agent.local", "secret"))
+    monkeypatch.setattr(tools, "_consume_rate_limit", lambda: True)
+    monkeypatch.setattr(tools, "_http_request", fake_http)
+    monkeypatch.setattr(tools, "get_security_config", lambda: type("Cfg", (), {"max_parts": 20, "max_raw_part_bytes": 262_144, "max_request_bytes": 1_048_576})())
+    monkeypatch.setattr("plugin.persistence.save_exchange", lambda **kwargs: None)
+
+    result = json.loads(tools.handle_call({
+        "url": "http://agent.local",
+        "message": "slow task",
+        "task_id": "local-bg",
+        "background": True,
+        "notify": True,
+        "notify_url": "https://client.example.test/a2a-notify",
+    }))
+
+    config = captured["payload"]["params"]["configuration"]["pushNotificationConfig"]
+    record = tools.task_store.get_task("local-bg")
+
+    assert result["background"] is True
+    assert config["token"]
+    assert record["push_token"] == config["token"]
+    assert record["notify_requested"] is True
+
+
+def test_background_without_notify_url_is_poll_only_not_push_eligible(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    captured = {}
+
+    def fake_http(method, url, json_body=None, headers=None):
+        if method == "GET":
+            return {"preferredTransport": "JSONRPC", "protocolVersion": "0.3.0", "capabilities": {"pushNotifications": True}}
+        captured["payload"] = json_body
+        return {"result": {"task": {"id": "remote-bg", "contextId": "ctx", "status": {"state": "submitted"}}}}
+
+    monkeypatch.setattr(tools, "_resolve_target", lambda name, url: ("http://agent.local", "secret"))
+    monkeypatch.setattr(tools, "_consume_rate_limit", lambda: True)
+    monkeypatch.setattr(tools, "_http_request", fake_http)
+    monkeypatch.setattr(tools, "get_security_config", lambda: type("Cfg", (), {"max_parts": 20, "max_raw_part_bytes": 262_144, "max_request_bytes": 1_048_576})())
+    monkeypatch.setattr("plugin.persistence.save_exchange", lambda **kwargs: None)
+
+    result = json.loads(tools.handle_call({
+        "url": "http://agent.local",
+        "message": "slow task",
+        "task_id": "local-bg",
+        "background": True,
+    }))
+
+    record = tools.task_store.get_task("local-bg")
+
+    assert result["background"] is True
+    assert "configuration" not in captured["payload"]["params"]
+    assert record["notify_requested"] is False
+    assert "push_token" not in record
+
 def test_handle_get_polls_remote_task_once(monkeypatch):
     captured = {}
 

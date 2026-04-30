@@ -8,3 +8,6 @@ build/
 
 # Ignore top-level dist/ but keep dashboard/dist/ (pre-built UI)
 /dist/
+
+# Local Hermes planning artifacts; never commit generated docs/plans
+/.hermes/

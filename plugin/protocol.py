@@ -310,6 +310,18 @@ def _native_artifacts(task_id: str, parts_artifacts: list[dict[str, Any]]) -> li
     return artifacts
 
 
+def is_native_response_wrapper(value: Any) -> bool:
+    return isinstance(value, dict) and (isinstance(value.get("task"), dict) or isinstance(value.get("message"), dict))
+
+
+def wrap_native_rpc_result(value: dict[str, Any]) -> dict[str, Any]:
+    if is_native_response_wrapper(value):
+        return value
+    if isinstance(value, dict) and value.get("kind") == "message":
+        return {"message": value}
+    return {"task": value}
+
+
 def build_task_result(
     task_id: str,
     state: Any,

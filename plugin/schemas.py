@@ -66,7 +66,7 @@ A2A_CALL = {
             },
             "notify_url": {
                 "type": "string",
-                "description": "Optional callback URL for background notification; normally omit unless explicitly configured",
+                "description": "Optional trusted http(s) callback URL for native push notifications in background mode; omit to use poll-first a2a_get",
             },
             "parts": {
                 "type": "array",
