@@ -356,7 +356,8 @@ def _on_post_llm_call(assistant_response=None, **kwargs):
     with _active_tasks_lock:
         if not _active_a2a_tasks:
             return
-        snapshot = dict(_active_a2a_tasks)
+        task_id, info = next(iter(_active_a2a_tasks.items()))
+        extras = [(extra_task_id, extra_info) for extra_task_id, extra_info in list(_active_a2a_tasks.items())[1:]]
         _active_a2a_tasks.clear()
 
     if assistant_response is None:
@@ -368,12 +369,16 @@ def _on_post_llm_call(assistant_response=None, **kwargs):
         if complete_as_failure:
             response_text = "(empty assistant response produced)"
 
-    if len(snapshot) > 1:
+    if extras:
         logger.warning(
-            "[A2A] Multiple active tasks for one assistant response; completing only the oldest"
+            "[A2A] Multiple active tasks for one assistant response; failing duplicate active tasks"
         )
+        for extra_task_id, _extra_info in extras:
+            try:
+                a2a_server.task_queue.fail(extra_task_id, "(discarded duplicate active A2A task)")
+            except Exception:
+                logger.debug("[A2A] Failed to fail duplicate active task %s", extra_task_id, exc_info=True)
 
-    task_id, info = next(iter(snapshot.items()))
     response_text = a2a_server.truncate_response_text(response_text)
 
     if complete_as_failure:

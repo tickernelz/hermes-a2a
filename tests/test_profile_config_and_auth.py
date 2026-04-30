@@ -83,7 +83,7 @@ def test_direct_url_uses_configured_agent_auth_token(monkeypatch):
     )
     monkeypatch.setattr(tools, "get_security_config", lambda: config.SecurityConfig(False, 50_000, 100_000, 1_048_576, 262_144, 20, 20))
 
-    def fake_http(method, url, json_body=None, headers=None):
+    def fake_http(method, url, json_body=None, headers=None, **kwargs):
         captured["headers"] = headers or {}
         return {"name": "local", "skills": [], "capabilities": {}}
 

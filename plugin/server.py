@@ -20,7 +20,7 @@ import re
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from threading import Event, Lock
 from collections import OrderedDict
-from typing import Optional
+from typing import Any, Optional
 import urllib.request
 import urllib.error
 
@@ -275,7 +275,15 @@ def _trigger_webhook(task_id: str = ""):
     if not secret:
         return
 
-    port = int(os.getenv("WEBHOOK_PORT", "47644"))
+    try:
+        port = int(os.getenv("WEBHOOK_PORT", "47644"))
+    except (TypeError, ValueError):
+        logger.warning("[A2A] Invalid WEBHOOK_PORT; skipping webhook trigger")
+        return
+    if port < 1 or port > 65535:
+        logger.warning("[A2A] WEBHOOK_PORT out of range; skipping webhook trigger")
+        return
+
     body = json.dumps({"event_type": "a2a_inbound", "task_id": task_id}).encode()
     sig = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
 
@@ -370,7 +378,16 @@ class A2ARequestHandler(BaseHTTPRequestHandler):
         return hmac.compare_digest(auth_header[7:].strip(), token)
 
     def _is_native_push_payload(self, body: Any) -> bool:
-        return isinstance(body, dict) and any(key in body for key in ("task", "message", "statusUpdate", "artifactUpdate"))
+        if not isinstance(body, dict) or "jsonrpc" in body or "method" in body:
+            return False
+        if isinstance(body.get("task"), dict):
+            return True
+        for key in ("statusUpdate", "artifactUpdate"):
+            value = body.get(key)
+            if isinstance(value, dict) and (value.get("taskId") or value.get("task_id") or value.get("id")):
+                return True
+        message = body.get("message")
+        return isinstance(message, dict) and bool(message.get("taskId") or message.get("task_id"))
 
     def do_GET(self) -> None:
         if self.path == "/.well-known/agent.json":

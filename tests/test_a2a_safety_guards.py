@@ -183,10 +183,12 @@ def test_pre_llm_holds_pending_tasks_while_active(monkeypatch):
     a2a_plugin._active_a2a_tasks.clear()
 
 
-def test_post_llm_completes_only_one_active_task(monkeypatch):
+def test_post_llm_completes_oldest_active_task_and_fails_duplicate(monkeypatch):
     completed = []
+    failed = []
     fake_queue = MagicMock()
     fake_queue.complete.side_effect = lambda task_id, response: completed.append((task_id, response))
+    fake_queue.fail.side_effect = lambda task_id, response: failed.append((task_id, response))
     fake_queue.pending_count.return_value = 0
     monkeypatch.setattr(a2a_plugin.a2a_server, "task_queue", fake_queue)
     monkeypatch.setattr(a2a_plugin, "save_exchange", MagicMock())
@@ -198,7 +200,7 @@ def test_post_llm_completes_only_one_active_task(monkeypatch):
     a2a_plugin._on_post_llm_call(assistant_response="reply")
 
     assert completed == [("task-1", "reply")]
-    fake_queue.fail.assert_not_called()
+    assert failed == [("task-2", "(discarded duplicate active A2A task)")]
     a2a_plugin._active_a2a_tasks.clear()
 
 

@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import secrets
+import http.client
 import socket
 import threading
 import time
@@ -51,24 +52,41 @@ def _normalize_url(url: str) -> str:
     return (url or "").strip().rstrip("/")
 
 
-def _host_is_private_or_link_local(hostname: str) -> bool:
+
+
+def _resolved_addresses(hostname: str, port: int | None = None) -> tuple[str, ...]:
     try:
-        addresses = socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
+        addresses = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
     except socket.gaierror:
-        return False
+        return ()
+    resolved: list[str] = []
     for address in addresses:
-        ip = ipaddress.ip_address(address[4][0])
-        if ip.is_private or ip.is_link_local or ip.is_loopback:
-            return True
-    return False
+        ip = str(ipaddress.ip_address(address[4][0]))
+        if ip not in resolved:
+            resolved.append(ip)
+    return tuple(resolved)
+
+
+def _ip_is_private_or_link_local(value: str) -> bool:
+    ip = ipaddress.ip_address(value)
+    return bool(ip.is_private or ip.is_link_local or ip.is_loopback)
+
+
+def _host_is_private_or_link_local(hostname: str) -> bool:
+    return any(_ip_is_private_or_link_local(ip) for ip in _resolved_addresses(hostname))
 
 
 def _validate_target_url(url: str, *, allow_private: bool = False) -> str:
     normalized = validate_url(url)
     parsed = urlparse(normalized)
     hostname = parsed.hostname or ""
-    if not allow_private and _host_is_private_or_link_local(hostname):
+    if allow_private:
+        return normalized
+    addresses = _resolved_addresses(hostname, parsed.port)
+    if any(_ip_is_private_or_link_local(ip) for ip in addresses):
         raise ValueError("A2A URL resolves to a private or link-local address; configure the agent explicitly to trust local/private targets")
+    if not addresses:
+        raise ValueError("A2A URL hostname does not resolve")
     return normalized
 
 
@@ -88,18 +106,18 @@ def _agent_by_url(url: str) -> dict[str, Any] | None:
     return None
 
 
-def _resolve_target(name: str, url: str) -> tuple[str, str]:
+def _resolve_target(name: str, url: str) -> tuple[str, str, bool]:
     """Resolve an outbound target and only allow configured raw URLs by default."""
     if name and not url:
         agent = _agent_by_name(name)
         if not agent:
             raise ValueError(f"Agent '{name}' not found in active Hermes profile config")
-        return _validate_target_url(agent.get("url", ""), allow_private=True), agent.get("auth_token", "")
+        return _validate_target_url(agent.get("url", ""), allow_private=True), agent.get("auth_token", ""), True
 
     url = validate_url(url)
     agent = _agent_by_url(url)
     if agent:
-        return _validate_target_url(url, allow_private=True), agent.get("auth_token", "")
+        return _validate_target_url(url, allow_private=True), agent.get("auth_token", ""), True
 
     if not get_security_config().allow_unconfigured_urls:
         raise ValueError(
@@ -107,7 +125,7 @@ def _resolve_target(name: str, url: str) -> tuple[str, str]:
             "or set a2a.security.allow_unconfigured_urls=true / A2A_ALLOW_UNCONFIGURED_URLS=true"
         )
 
-    return _validate_target_url(url, allow_private=False), ""
+    return _validate_target_url(url, allow_private=False), "", False
 
 
 def _ok(data: dict) -> str:
@@ -123,31 +141,54 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
         raise urllib.error.HTTPError(req.full_url, code, "Redirect blocked", headers, fp)
 
 
-def _http_request(method: str, url: str, json_body: dict = None, headers: dict = None) -> dict:
-    """Synchronous HTTP request using urllib (no async dependency)."""
-    import urllib.request
-    import urllib.error
+def _http_request(method: str, url: str, json_body: dict = None, headers: dict = None, *, allow_private: bool = True) -> dict:
+    """Synchronous HTTP request using one pinned DNS resolution."""
+    parsed = urlparse(validate_url(url))
+    hostname = parsed.hostname or ""
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    addresses = _resolved_addresses(hostname, port)
+    if not addresses:
+        raise ConnectionError("Cannot connect: hostname does not resolve")
+    if not allow_private and any(_ip_is_private_or_link_local(ip) for ip in addresses):
+        raise ValueError("A2A URL DNS target changed to a private or link-local address")
 
-    req_headers = {"Content-Type": "application/json", "User-Agent": "Hermes-A2A/1.0"}
+    target_ip = addresses[0]
+    host_header = hostname
+    if parsed.port:
+        host_header = f"{hostname}:{parsed.port}"
+
+    req_headers = {"Content-Type": "application/json", "User-Agent": "Hermes-A2A/1.0", "Host": host_header}
     if headers:
         req_headers.update(headers)
+        req_headers["Host"] = host_header
 
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
     data = json.dumps(json_body).encode() if json_body else None
-    req = urllib.request.Request(url, data=data, headers=req_headers, method=method)
-
-    opener = urllib.request.build_opener(_NoRedirectHandler)
     try:
-        with opener.open(req, timeout=_DEFAULT_TIMEOUT) as resp:
-            data = resp.read(_MAX_RESPONSE_SIZE + 1)
-            if len(data) > _MAX_RESPONSE_SIZE:
+        if parsed.scheme == "https":
+            conn = http.client.HTTPSConnection(hostname, port, timeout=_DEFAULT_TIMEOUT)
+            conn._create_connection = lambda address, timeout=_DEFAULT_TIMEOUT, source_address=None: socket.create_connection((target_ip, port), timeout, source_address)
+        else:
+            conn = http.client.HTTPConnection(target_ip, port, timeout=_DEFAULT_TIMEOUT)
+        try:
+            conn.request(method, path, body=data, headers=req_headers)
+            resp = conn.getresponse()
+            if 300 <= resp.status < 400:
+                raise RuntimeError(f"HTTP {resp.status}")
+            if resp.status >= 400:
+                raise RuntimeError(f"HTTP {resp.status}")
+            raw = resp.read(_MAX_RESPONSE_SIZE + 1)
+            if len(raw) > _MAX_RESPONSE_SIZE:
                 raise RuntimeError(f"Response exceeds {_MAX_RESPONSE_SIZE} bytes")
-            return json.loads(data.decode())
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(f"HTTP {e.code}") from e
-    except urllib.error.URLError as e:
-        if isinstance(e.reason, (TimeoutError, OSError)) and "timed out" in str(e.reason):
-            raise TimeoutError(f"Timed out after {_DEFAULT_TIMEOUT}s") from e
-        raise ConnectionError(f"Cannot connect: {e.reason}") from e
+            return json.loads(raw.decode())
+        finally:
+            conn.close()
+    except TimeoutError as e:
+        raise TimeoutError(f"Timed out after {_DEFAULT_TIMEOUT}s") from e
+    except OSError as e:
+        raise ConnectionError(f"Cannot connect: {e}") from e
 
 
 
@@ -294,9 +335,9 @@ def _build_message_parts(message: str, extra_parts: list | None = None, *, nativ
     return parts
 
 
-def _discover_card(url: str, headers: dict) -> dict | None:
+def _discover_card(url: str, headers: dict, *, allow_private: bool = True) -> dict | None:
     try:
-        return _http_request("GET", f"{url.rstrip('/')}/.well-known/agent.json", headers=headers)
+        return _http_request("GET", f"{url.rstrip('/')}/.well-known/agent.json", headers=headers, allow_private=allow_private)
     except Exception as exc:
         logger.debug("A2A card discovery skipped: %s", exc)
         return None
@@ -345,7 +386,7 @@ def handle_discover(args: dict, **kwargs) -> str:
         return _err("Provide either 'url' or 'name'")
 
     try:
-        url, auth_token = _resolve_target(name, url)
+        url, auth_token, allow_private = _resolve_target(name, url)
     except ValueError as e:
         return _err(str(e))
 
@@ -354,7 +395,7 @@ def handle_discover(args: dict, **kwargs) -> str:
         headers["Authorization"] = f"Bearer {auth_token}"
 
     try:
-        card = _http_request("GET", f"{url.rstrip('/')}/.well-known/agent.json", headers=headers)
+        card = _http_request("GET", f"{url.rstrip('/')}/.well-known/agent.json", headers=headers, allow_private=allow_private)
     except ConnectionError:
         return _err(f"Cannot connect to {url}")
     except Exception as e:
@@ -398,14 +439,14 @@ def handle_call(args: dict, **kwargs) -> str:
         return _err(f"Rate limit exceeded: max {_RATE_LIMIT_MAX_CALLS} calls per {_RATE_LIMIT_WINDOW}s")
 
     try:
-        url, auth_token = _resolve_target(name, url)
+        url, auth_token, allow_private = _resolve_target(name, url)
     except ValueError as e:
         return _err(str(e))
     headers = {}
     if auth_token:
         headers["Authorization"] = f"Bearer {auth_token}"
 
-    card = _discover_card(url, headers)
+    card = _discover_card(url, headers, allow_private=allow_private)
     native = _is_native_card(card)
 
     # filter_outbound: strip sensitive data from what we send out
@@ -501,7 +542,7 @@ def handle_call(args: dict, **kwargs) -> str:
     error_msg = ""
 
     try:
-        result = _http_request("POST", url.rstrip("/"), json_body=payload, headers=headers)
+        result = _http_request("POST", url.rstrip("/"), json_body=payload, headers=headers, allow_private=allow_private)
     except ConnectionError:
         error_msg = f"Cannot connect to {url}"
     except TimeoutError:
@@ -527,19 +568,30 @@ def handle_call(args: dict, **kwargs) -> str:
                     "method": "GetTask" if native else "tasks/get",
                     "params": {"id": remote_task_id},
                 }
+                last_poll_error = ""
                 for attempt in range(_POLL_MAX_ATTEMPTS):
                     time.sleep(_POLL_INTERVAL)
                     try:
-                        poll_result = _http_request("POST", url.rstrip("/"), json_body=poll_payload, headers=headers)
+                        poll_result = _http_request("POST", url.rstrip("/"), json_body=poll_payload, headers=headers, allow_private=allow_private)
+                        rpc_error = poll_result.get("error") if isinstance(poll_result, dict) else None
+                        if rpc_error:
+                            last_poll_error = rpc_error.get("message", str(rpc_error)) if isinstance(rpc_error, dict) else str(rpc_error)
+                            break
                         parsed = _parse_rpc_task_response(poll_result, remote_task_id)
                         poll_state = parsed["state"]
                         if _terminal_state(poll_state):
                             remote_task_id = parsed["task_id"]
                             task_state = poll_state
                             response_text = parsed["text"]
+                            last_poll_error = ""
                             break
-                    except Exception:
-                        continue
+                    except Exception as exc:
+                        last_poll_error = str(exc)
+                        if "HTTP 4" in last_poll_error:
+                            break
+                        logger.debug("A2A poll attempt %s failed: %s", attempt + 1, exc)
+                if last_poll_error:
+                    error_msg = f"Remote task polling failed: {last_poll_error}"
 
     audit.log("call_inbound", {"source": url, "task_state": task_state, "task_id": task_id, "error": error_msg or None})
 
@@ -593,11 +645,11 @@ def handle_get(args: dict, **kwargs) -> str:
     if not task_id:
         return _err("'task_id' is required")
     try:
-        url, auth_token = _resolve_target(name, url)
+        url, auth_token, allow_private = _resolve_target(name, url)
     except ValueError as e:
         return _err(str(e))
     headers = _headers(auth_token)
-    native = _is_native_card(_discover_card(url, headers))
+    native = _is_native_card(_discover_card(url, headers, allow_private=allow_private))
     payload = {
         "jsonrpc": "2.0",
         "id": str(uuid.uuid4()),
@@ -605,7 +657,7 @@ def handle_get(args: dict, **kwargs) -> str:
         "params": {"id": task_id},
     }
     try:
-        result = _http_request("POST", url.rstrip("/"), json_body=payload, headers=headers)
+        result = _http_request("POST", url.rstrip("/"), json_body=payload, headers=headers, allow_private=allow_private)
     except Exception as exc:
         return _err(f"Get failed: {exc}")
     if result.get("error"):
@@ -627,11 +679,11 @@ def handle_cancel(args: dict, **kwargs) -> str:
     if not task_id:
         return _err("'task_id' is required")
     try:
-        url, auth_token = _resolve_target(name, url)
+        url, auth_token, allow_private = _resolve_target(name, url)
     except ValueError as e:
         return _err(str(e))
     headers = _headers(auth_token)
-    native = _is_native_card(_discover_card(url, headers))
+    native = _is_native_card(_discover_card(url, headers, allow_private=allow_private))
     payload = {
         "jsonrpc": "2.0",
         "id": str(uuid.uuid4()),
@@ -639,7 +691,7 @@ def handle_cancel(args: dict, **kwargs) -> str:
         "params": {"id": task_id},
     }
     try:
-        result = _http_request("POST", url.rstrip("/"), json_body=payload, headers=headers)
+        result = _http_request("POST", url.rstrip("/"), json_body=payload, headers=headers, allow_private=allow_private)
     except Exception as exc:
         return _err(f"Cancel failed: {exc}")
     if result.get("error"):

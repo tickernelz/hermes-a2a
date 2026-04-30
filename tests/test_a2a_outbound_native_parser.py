@@ -65,14 +65,14 @@ def test_parse_native_message_response_shape():
 def test_working_native_state_is_pollable(monkeypatch):
     calls = []
 
-    def fake_http(method, url, json_body=None, headers=None):
+    def fake_http(method, url, json_body=None, headers=None, **kwargs):
         calls.append(json_body["method"])
         if json_body["method"] == "tasks/send":
             return {"result": {"task": {"id": "t4", "status": {"state": "TASK_STATE_WORKING"}}}}
         return {"result": {"task": {"id": "t4", "status": {"state": "TASK_STATE_COMPLETED"}, "artifacts": [{"parts": [{"text": "done"}]}]}}}
 
     monkeypatch.setattr(tools, "_http_request", fake_http)
-    monkeypatch.setattr(tools, "_resolve_target", lambda name, url: ("http://agent", "token"))
+    monkeypatch.setattr(tools, "_resolve_target", lambda name, url: ("http://agent", "token", True))
     monkeypatch.setattr(tools, "_consume_rate_limit", lambda: True)
     monkeypatch.setattr(tools.time, "sleep", lambda _seconds: None)
 
@@ -86,12 +86,12 @@ def test_working_native_state_is_pollable(monkeypatch):
 def test_handle_call_can_send_structured_parts(monkeypatch):
     captured = {}
 
-    def fake_http(method, url, json_body=None, headers=None):
+    def fake_http(method, url, json_body=None, headers=None, **kwargs):
         captured["payload"] = json_body
         return {"result": {"id": "t5", "status": {"state": "TASK_STATE_COMPLETED"}, "artifacts": [{"parts": [{"type": "text", "text": "ok"}]}]}}
 
     monkeypatch.setattr(tools, "_http_request", fake_http)
-    monkeypatch.setattr(tools, "_resolve_target", lambda name, url: ("http://agent", "token"))
+    monkeypatch.setattr(tools, "_resolve_target", lambda name, url: ("http://agent", "token", True))
     monkeypatch.setattr(tools, "_consume_rate_limit", lambda: True)
 
     result = json.loads(
@@ -144,7 +144,7 @@ def test_build_message_parts_rejects_too_many_parts(monkeypatch):
 def test_handle_call_discovers_native_card_and_uses_message_send(monkeypatch, tmp_path):
     calls = []
 
-    def fake_http(method, url, json_body=None, headers=None):
+    def fake_http(method, url, json_body=None, headers=None, **kwargs):
         calls.append({"method": method, "url": url, "json_body": json_body, "headers": headers or {}})
         if method == "GET":
             return {"preferredTransport": "JSONRPC", "protocolVersion": "0.3.0"}
@@ -163,7 +163,7 @@ def test_handle_call_discovers_native_card_and_uses_message_send(monkeypatch, tm
             }
         }
 
-    monkeypatch.setattr(tools, "_resolve_target", lambda name, url: ("http://agent.local", "secret"))
+    monkeypatch.setattr(tools, "_resolve_target", lambda name, url: ("http://agent.local", "secret", True))
     monkeypatch.setattr(tools, "_consume_rate_limit", lambda: True)
     monkeypatch.setattr(tools, "_http_request", fake_http)
     monkeypatch.setattr(tools, "get_security_config", lambda: type("Cfg", (), {"max_parts": 20, "max_raw_part_bytes": 262_144, "max_request_bytes": 1_048_576})())
@@ -182,13 +182,13 @@ def test_handle_call_discovers_native_card_and_uses_message_send(monkeypatch, tm
 def test_handle_call_falls_back_to_legacy_send_for_unknown_card(monkeypatch):
     posts = []
 
-    def fake_http(method, url, json_body=None, headers=None):
+    def fake_http(method, url, json_body=None, headers=None, **kwargs):
         if method == "GET":
             return {"protocolVersion": "0.2.0"}
         posts.append(json_body)
         return {"result": {"id": "remote-task", "status": {"state": "completed"}, "artifacts": [{"parts": [{"type": "text", "text": "legacy-ok"}]}]}}
 
-    monkeypatch.setattr(tools, "_resolve_target", lambda name, url: ("http://agent.local", ""))
+    monkeypatch.setattr(tools, "_resolve_target", lambda name, url: ("http://agent.local", "", True))
     monkeypatch.setattr(tools, "_consume_rate_limit", lambda: True)
     monkeypatch.setattr(tools, "_http_request", fake_http)
     monkeypatch.setattr(tools, "get_security_config", lambda: type("Cfg", (), {"max_parts": 20, "max_raw_part_bytes": 262_144, "max_request_bytes": 1_048_576})())
@@ -227,7 +227,7 @@ def test_build_message_parts_rejects_aggregate_size(monkeypatch):
 def test_handle_call_uses_native_gettask_when_polling(monkeypatch):
     calls = []
 
-    def fake_http(method, url, json_body=None, headers=None):
+    def fake_http(method, url, json_body=None, headers=None, **kwargs):
         calls.append(json_body if method == "POST" else {"method": "GET"})
         if method == "GET":
             return {"preferredTransport": "JSONRPC", "protocolVersion": "0.3.0"}
@@ -236,7 +236,7 @@ def test_handle_call_uses_native_gettask_when_polling(monkeypatch):
         assert json_body["method"] == "GetTask"
         return {"result": {"kind": "task", "id": "remote-task", "contextId": "remote-task", "status": {"state": "completed", "message": {"parts": [{"kind": "text", "text": "done"}]}}}}
 
-    monkeypatch.setattr(tools, "_resolve_target", lambda name, url: ("http://agent.local", ""))
+    monkeypatch.setattr(tools, "_resolve_target", lambda name, url: ("http://agent.local", "", True))
     monkeypatch.setattr(tools, "_consume_rate_limit", lambda: True)
     monkeypatch.setattr(tools, "_http_request", fake_http)
     monkeypatch.setattr(tools.time, "sleep", lambda _seconds: None)
@@ -278,7 +278,7 @@ def test_handle_call_background_does_not_poll(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     calls = []
 
-    def fake_http(method, url, json_body=None, headers=None):
+    def fake_http(method, url, json_body=None, headers=None, **kwargs):
         if method == "GET":
             return {"preferredTransport": "JSONRPC", "protocolVersion": "0.3.0"}
         calls.append(json_body["method"])
@@ -286,7 +286,7 @@ def test_handle_call_background_does_not_poll(monkeypatch, tmp_path):
             raise AssertionError("background call must not poll")
         return {"result": {"kind": "task", "id": "remote-bg", "contextId": "ctx", "status": {"state": "working"}}}
 
-    monkeypatch.setattr(tools, "_resolve_target", lambda name, url: ("http://agent.local", ""))
+    monkeypatch.setattr(tools, "_resolve_target", lambda name, url: ("http://agent.local", "", True))
     monkeypatch.setattr(tools, "_consume_rate_limit", lambda: True)
     monkeypatch.setattr(tools, "_http_request", fake_http)
     monkeypatch.setattr(tools, "get_security_config", lambda: type("Cfg", (), {"max_parts": 20, "max_raw_part_bytes": 262_144, "max_request_bytes": 1_048_576})())
@@ -303,12 +303,12 @@ def test_handle_call_background_does_not_poll(monkeypatch, tmp_path):
 def test_handle_call_background_completed_immediately_returns_completed(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
-    def fake_http(method, url, json_body=None, headers=None):
+    def fake_http(method, url, json_body=None, headers=None, **kwargs):
         if method == "GET":
             return {"preferredTransport": "JSONRPC", "protocolVersion": "0.3.0"}
         return {"result": {"kind": "task", "id": "remote-bg", "contextId": "ctx", "status": {"state": "completed", "message": {"parts": [{"kind": "text", "text": "done"}]}}}}
 
-    monkeypatch.setattr(tools, "_resolve_target", lambda name, url: ("http://agent.local", ""))
+    monkeypatch.setattr(tools, "_resolve_target", lambda name, url: ("http://agent.local", "", True))
     monkeypatch.setattr(tools, "_consume_rate_limit", lambda: True)
     monkeypatch.setattr(tools, "_http_request", fake_http)
     monkeypatch.setattr(tools, "get_security_config", lambda: type("Cfg", (), {"max_parts": 20, "max_raw_part_bytes": 262_144, "max_request_bytes": 1_048_576})())
@@ -327,13 +327,13 @@ def test_native_background_call_sends_push_notification_config(monkeypatch, tmp_
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     captured = {}
 
-    def fake_http(method, url, json_body=None, headers=None):
+    def fake_http(method, url, json_body=None, headers=None, **kwargs):
         if method == "GET":
             return {"preferredTransport": "JSONRPC", "protocolVersion": "0.3.0", "capabilities": {"pushNotifications": True}}
         captured["payload"] = json_body
         return {"result": {"task": {"id": "remote-bg", "contextId": "ctx", "status": {"state": "submitted"}}}}
 
-    monkeypatch.setattr(tools, "_resolve_target", lambda name, url: ("http://agent.local", "secret"))
+    monkeypatch.setattr(tools, "_resolve_target", lambda name, url: ("http://agent.local", "secret", True))
     monkeypatch.setattr(tools, "_consume_rate_limit", lambda: True)
     monkeypatch.setattr(tools, "_http_request", fake_http)
     monkeypatch.setattr(tools, "get_security_config", lambda: type("Cfg", (), {"max_parts": 20, "max_raw_part_bytes": 262_144, "max_request_bytes": 1_048_576})())
@@ -359,13 +359,13 @@ def test_native_background_call_rejects_unsafe_notify_url(monkeypatch, tmp_path)
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     called = {"post": False}
 
-    def fake_http(method, url, json_body=None, headers=None):
+    def fake_http(method, url, json_body=None, headers=None, **kwargs):
         if method == "GET":
             return {"preferredTransport": "JSONRPC", "protocolVersion": "0.3.0", "capabilities": {"pushNotifications": True}}
         called["post"] = True
         return {}
 
-    monkeypatch.setattr(tools, "_resolve_target", lambda name, url: ("http://agent.local", "secret"))
+    monkeypatch.setattr(tools, "_resolve_target", lambda name, url: ("http://agent.local", "secret", True))
     monkeypatch.setattr(tools, "_consume_rate_limit", lambda: True)
     monkeypatch.setattr(tools, "_http_request", fake_http)
     monkeypatch.setattr(tools, "get_security_config", lambda: type("Cfg", (), {"max_parts": 20, "max_raw_part_bytes": 262_144, "max_request_bytes": 1_048_576})())
@@ -388,13 +388,13 @@ def test_native_background_push_config_generates_and_persists_per_task_token(mon
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     captured = {}
 
-    def fake_http(method, url, json_body=None, headers=None):
+    def fake_http(method, url, json_body=None, headers=None, **kwargs):
         if method == "GET":
             return {"preferredTransport": "JSONRPC", "protocolVersion": "0.3.0", "capabilities": {"pushNotifications": True}}
         captured["payload"] = json_body
         return {"result": {"task": {"id": "remote-bg", "contextId": "ctx", "status": {"state": "submitted"}}}}
 
-    monkeypatch.setattr(tools, "_resolve_target", lambda name, url: ("http://agent.local", "secret"))
+    monkeypatch.setattr(tools, "_resolve_target", lambda name, url: ("http://agent.local", "secret", True))
     monkeypatch.setattr(tools, "_consume_rate_limit", lambda: True)
     monkeypatch.setattr(tools, "_http_request", fake_http)
     monkeypatch.setattr(tools, "get_security_config", lambda: type("Cfg", (), {"max_parts": 20, "max_raw_part_bytes": 262_144, "max_request_bytes": 1_048_576})())
@@ -422,13 +422,13 @@ def test_background_without_notify_url_is_poll_only_not_push_eligible(monkeypatc
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     captured = {}
 
-    def fake_http(method, url, json_body=None, headers=None):
+    def fake_http(method, url, json_body=None, headers=None, **kwargs):
         if method == "GET":
             return {"preferredTransport": "JSONRPC", "protocolVersion": "0.3.0", "capabilities": {"pushNotifications": True}}
         captured["payload"] = json_body
         return {"result": {"task": {"id": "remote-bg", "contextId": "ctx", "status": {"state": "submitted"}}}}
 
-    monkeypatch.setattr(tools, "_resolve_target", lambda name, url: ("http://agent.local", "secret"))
+    monkeypatch.setattr(tools, "_resolve_target", lambda name, url: ("http://agent.local", "secret", True))
     monkeypatch.setattr(tools, "_consume_rate_limit", lambda: True)
     monkeypatch.setattr(tools, "_http_request", fake_http)
     monkeypatch.setattr(tools, "get_security_config", lambda: type("Cfg", (), {"max_parts": 20, "max_raw_part_bytes": 262_144, "max_request_bytes": 1_048_576})())
@@ -451,13 +451,13 @@ def test_background_without_notify_url_is_poll_only_not_push_eligible(monkeypatc
 def test_handle_get_polls_remote_task_once(monkeypatch):
     captured = {}
 
-    def fake_http(method, url, json_body=None, headers=None):
+    def fake_http(method, url, json_body=None, headers=None, **kwargs):
         captured["payload"] = json_body
         return {"result": {"kind": "task", "id": "remote-1", "contextId": "ctx", "status": {"state": "completed", "message": {"parts": [{"kind": "text", "text": "done"}]}}}}
 
-    monkeypatch.setattr(tools, "_resolve_target", lambda name, url: ("http://agent.local", "secret"))
+    monkeypatch.setattr(tools, "_resolve_target", lambda name, url: ("http://agent.local", "secret", True))
     monkeypatch.setattr(tools, "_http_request", fake_http)
-    monkeypatch.setattr(tools, "_discover_card", lambda url, headers: {"preferredTransport": "JSONRPC", "protocolVersion": "0.3.0"})
+    monkeypatch.setattr(tools, "_discover_card", lambda url, headers, **kwargs: {"preferredTransport": "JSONRPC", "protocolVersion": "0.3.0"})
 
     result = json.loads(tools.handle_get({"name": "reviewer", "task_id": "remote-1"}))
 
@@ -470,12 +470,12 @@ def test_handle_get_polls_remote_task_once(monkeypatch):
 def test_background_persists_before_http_post(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
-    def fake_http(method, url, json_body=None, headers=None):
+    def fake_http(method, url, json_body=None, headers=None, **kwargs):
         if method == "GET":
             return {"preferredTransport": "JSONRPC", "protocolVersion": "0.3.0"}
         raise TimeoutError("boom")
 
-    monkeypatch.setattr(tools, "_resolve_target", lambda name, url: ("http://agent.local", ""))
+    monkeypatch.setattr(tools, "_resolve_target", lambda name, url: ("http://agent.local", "", True))
     monkeypatch.setattr(tools, "_consume_rate_limit", lambda: True)
     monkeypatch.setattr(tools, "_http_request", fake_http)
     monkeypatch.setattr(tools, "get_security_config", lambda: type("Cfg", (), {"max_parts": 20, "max_raw_part_bytes": 262_144, "max_request_bytes": 1_048_576})())

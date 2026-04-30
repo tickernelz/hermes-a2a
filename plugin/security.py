@@ -96,12 +96,16 @@ class RateLimiter:
 
     def allow(self, client_id: str) -> bool:
         now = time.time()
+        cutoff = now - self.window
         with self._lock:
+            for key in list(self._buckets.keys()):
+                self._buckets[key] = [ts for ts in self._buckets[key] if ts > cutoff]
+                if not self._buckets[key] and key != client_id:
+                    del self._buckets[key]
             bucket = self._buckets[client_id]
-            self._buckets[client_id] = [ts for ts in bucket if ts > now - self.window]
-            if len(self._buckets[client_id]) >= self.max_requests:
+            if len(bucket) >= self.max_requests:
                 return False
-            self._buckets[client_id].append(now)
+            bucket.append(now)
             return True
 
 
