@@ -73,7 +73,7 @@ Restart the target Hermes gateway after install. The installer intentionally doe
 ### Install a pinned CLI/source release
 
 ```bash
-HERMES_A2A_REF=v0.3.1 \
+HERMES_A2A_REF=v0.3.2 \
   curl -fsSL https://raw.githubusercontent.com/tickernelz/hermes-a2a/main/scripts/a2a.sh | bash
 ```
 
@@ -187,25 +187,14 @@ a2a:
     name: primary_agent
     description: Primary Hermes A2A profile
   server:
-    host: 127.0.0.1
     port: 41731
-    public_url: http://127.0.0.1:41731
-    require_auth: true
     auth_token: "[REDACTED]"
   wake:
-    enabled: true
     port: 47644
     secret: "[REDACTED]"
-    route: a2a_trigger
-    prompt: "[A2A trigger]"
-    mode: owner_session
-    session:
+    session_ref:
       platform: discord
       chat_id: "<discord-channel-or-thread-id>"
-      chat_type: group
-      actor:
-        id: "<discord-user-id>"
-        name: "<display-name>"
   agents:
   - name: coder
     url: http://127.0.0.1:41732
@@ -216,9 +205,9 @@ a2a:
     trust_level: trusted
 ```
 
-`wake.session.actor` selects the Hermes gateway session for internal A2A wake events. It is not an allowlist and not authentication.
+A2A wake routing is intentionally minimal in canonical config. `wake.session_ref` anchors the target Hermes gateway session, and installer/migration resolves the verbose `chat_type`, `thread_id`, `actor.id`, and `actor.name` from Hermes session history when it generates webhook compatibility routes.
 
-The installer still generates Hermes webhook compatibility sections (`webhook.extra.routes` and `platforms.webhook.extra.routes`) from `a2a.wake`, but those are internal generated config. Edit the canonical `a2a` block or rerun the wizard/migration instead of hand-editing `deliver`/`source`.
+The installer still generates Hermes webhook compatibility sections (`webhook.extra.routes` and `platforms.webhook.extra.routes`) from `a2a.wake.session_ref`, but those are internal generated config. Edit the canonical `a2a` block or rerun the wizard/migration instead of hand-editing `deliver`/`source`.
 
 To convert an old env-heavy install:
 

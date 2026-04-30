@@ -129,8 +129,8 @@ def get_server_config(config: dict[str, Any] | None = None) -> ServerConfig:
 
     host = str(server.get("host") or "127.0.0.1")
     port = _int(server.get("port"), 41731)
-    public_url = (str(server.get("public_url") or "")).rstrip("/")
-    require_auth = _truthy(server.get("require_auth"))
+    public_url = (str(server.get("public_url") or "") or f"http://{host}:{port}").rstrip("/")
+    require_auth = server.get("require_auth", True) is not False
     runtime = a2a.get("runtime", {})
     if not isinstance(runtime, dict):
         runtime = {}
@@ -162,6 +162,14 @@ def get_wake_config(config: dict[str, Any] | None = None) -> WakeConfig:
     if not isinstance(wake, dict):
         wake = {}
     session = wake.get("session") if isinstance(wake.get("session"), dict) else {}
+    if not session and isinstance(wake.get("session_ref"), dict):
+        ref = wake["session_ref"]
+        platform = str(ref.get("platform") or "").strip()
+        chat_id = str(ref.get("chat_id") or "").strip()
+        if platform and chat_id:
+            session = {"platform": platform, "chat_id": chat_id}
+            if ref.get("thread_id") not in (None, ""):
+                session["thread_id"] = ref["thread_id"]
     return WakeConfig(
         enabled=wake.get("enabled", True) is not False,
         port=_int(wake.get("port"), 47644),

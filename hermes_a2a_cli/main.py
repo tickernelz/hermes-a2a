@@ -16,8 +16,9 @@ except Exception:
     yaml = None
 
 from . import __version__ as CLI_VERSION
-from .installer import InstallError, install_profile, uninstall_profile
+from .installer import InstallError, install_profile, resolve_wake_session, uninstall_profile
 from .migrations import build_migration_plan, migrate_config_unify
+from .multi_install import HermesProfile, build_generated_profiles, discover_profiles, infer_wake_session_from_history, preview_generated_profiles
 from .migrations.registry import MigrationPlanError
 from .state import StateError, build_install_state, load_state, state_path, write_state
 from .wizard import collect_wizard_answers
@@ -37,7 +38,7 @@ def repo_root() -> Path:
 
 
 def default_home() -> Path:
-    return Path.home() / ".hermes"
+    return Path(os.environ.get("HERMES_A2A_ROOT_HOME", str(Path.home() / ".hermes"))).expanduser()
 
 
 def profile_home(name: str) -> Path:
@@ -152,7 +153,8 @@ def inspect_status(home: Path) -> dict[str, Any]:
     a2a_config = config.get("a2a") if isinstance(config.get("a2a"), dict) else {}
     server = a2a_config.get("server") if isinstance(a2a_config.get("server"), dict) else {}
     wake = a2a_config.get("wake") if isinstance(a2a_config.get("wake"), dict) else {}
-    session = wake.get("session") if isinstance(wake.get("session"), dict) else {}
+    session = resolve_wake_session(a2a_config)
+    ref = wake.get("session_ref") if isinstance(wake.get("session_ref"), dict) else {}
     plugins = config.get("plugins") if isinstance(config.get("plugins"), dict) else {}
     enabled_plugins = plugins.get("enabled") if isinstance(plugins.get("enabled"), list) else []
     return {
@@ -170,8 +172,9 @@ def inspect_status(home: Path) -> dict[str, Any]:
             "public_url": server.get("public_url"),
             "require_auth": server.get("require_auth"),
             "wake_port": wake.get("port"),
-            "wake_platform": session.get("platform"),
-            "wake_chat_id": session.get("chat_id"),
+            "wake_platform": session.get("platform") or ref.get("platform"),
+            "wake_chat_id": session.get("chat_id") or ref.get("chat_id"),
+            "wake_session_ref": wake.get("session_ref"),
             "wake_actor": (session.get("actor") or {}).get("name") if isinstance(session.get("actor"), dict) else None,
         },
     }
@@ -186,10 +189,16 @@ def print_result(payload: dict[str, Any], as_json: bool) -> None:
     print(f"hermes-a2a {command or 'status'}")
     if home:
         print(f"profile: {home}")
+    if payload.get("mode"):
+        print(f"mode: {payload['mode']}")
     if "installed" in payload:
         print(f"installed: {payload['installed']}")
     if payload.get("plugin_version"):
         print(f"plugin_version: {payload['plugin_version']}")
+    if payload.get("preview"):
+        print("preview:")
+        for item in payload["preview"]:
+            print(f"- {item}")
     for item in payload.get("plan", []):
         print(f"- {item}")
     if payload.get("restart_required"):
@@ -221,7 +230,7 @@ def _confirm(question: str, default: bool) -> bool:
     return value in {"y", "yes", "1", "true", "on"}
 
 
-def install_payload(home: Path, *, dry_run: bool, answers=None, migration_state: dict[str, Any] | None = None) -> dict[str, Any]:
+def install_payload(home: Path, *, dry_run: bool, answers=None, migration_state: dict[str, Any] | None = None, write_state_manifest: bool = True) -> dict[str, Any]:
     config_path = home / "config.yaml"
     load_yaml(config_path)
     plugin_source = repo_root() / "plugin"
@@ -241,20 +250,21 @@ def install_payload(home: Path, *, dry_run: bool, answers=None, migration_state:
             "messages": result["messages"],
         }
     stamp = time.strftime("%Y%m%d%H%M%S")
-    backup_root = home / STATE_DIR_NAME / "backups" / stamp
     backed_up = []
-    target = backup_path(path, backup_root)
-    if target is not None:
-        backed_up.append(str(target))
-    state = build_install_state(
-        installed_version=version,
-        source={"type": "local_checkout", "path": str(repo_root()), "commit": git_commit()},
-        backup_id=stamp if backed_up else None,
-    )
-    if migration_state:
-        state["migration_version"] = migration_state.get("migration_version", state["migration_version"])
-        state["migration_ledger"] = migration_state.get("migration_ledger", state["migration_ledger"])
-    write_state(home, state)
+    if write_state_manifest:
+        backup_root = home / STATE_DIR_NAME / "backups" / stamp
+        target = backup_path(path, backup_root)
+        if target is not None:
+            backed_up.append(str(target))
+        state = build_install_state(
+            installed_version=version,
+            source={"type": "local_checkout", "path": str(repo_root()), "commit": git_commit()},
+            backup_id=stamp if backed_up else None,
+        )
+        if migration_state:
+            state["migration_version"] = migration_state.get("migration_version", state["migration_version"])
+            state["migration_ledger"] = migration_state.get("migration_ledger", state["migration_ledger"])
+        write_state(home, state)
     return {
         "command": "install",
         "dry_run": False,
@@ -290,7 +300,75 @@ def command_doctor(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def _parse_selection(raw: str, profiles: list[HermesProfile]) -> list[HermesProfile]:
+    selected: list[HermesProfile] = []
+    by_name = {profile.name.lower(): profile for profile in profiles}
+    tokens = [part.strip() for part in raw.replace(";", ",").split(",") if part.strip()]
+    if not tokens:
+        return selected
+    if any(token.lower() == "all" for token in tokens):
+        return list(profiles)
+    for token in tokens:
+        match = None
+        if token.isdigit():
+            index = int(token) - 1
+            if 0 <= index < len(profiles):
+                match = profiles[index]
+        if match is None:
+            match = by_name.get(token.lower())
+        if match is not None and match not in selected:
+            selected.append(match)
+    return selected
+
+
+def _prompt_multi_profile_selection(profiles: list[HermesProfile]) -> list[HermesProfile]:
+    print("Select Hermes profiles to connect with A2A:", file=sys.stderr)
+    for index, profile in enumerate(profiles, 1):
+        print(f"  [{index}] {profile.name} -> {profile.home}", file=sys.stderr)
+    print("Tip: choose 2+ profiles for a connected topology, e.g. '1,2'. Type 'all' to select all shown profiles.", file=sys.stderr)
+    print("Safety: only selected profiles are changed; no gateway restart is performed.", file=sys.stderr)
+    selected = _parse_selection(input("Profiles to configure: ").strip(), profiles)
+    if not selected:
+        raise CliError("No profiles selected")
+    return selected
+
+
+def _wake_defaults_from_prompt(inferred: dict[str, str] | None = None) -> dict[str, str]:
+    inferred = inferred or {}
+    if inferred:
+        print("Detected a recent Hermes gateway session for A2A wake routing:", file=sys.stderr)
+        print(
+            f"  platform={inferred.get('platform')} chat_id={inferred.get('chat_id')} "
+            f"thread_id={inferred.get('thread_id') or '-'} actor_id={inferred.get('actor_id')} "
+            f"actor_name={inferred.get('actor_name')}",
+            file=sys.stderr,
+        )
+        if _confirm("Use this detected wake session", True):
+            return inferred
+    if not _confirm("Configure one shared wake session for selected profiles", True):
+        return {}
+    print("Wake session = where Hermes receives the internal A2A wake event.", file=sys.stderr)
+    print("chat/channel ID selects the room/thread; actor ID selects the Hermes session owner and is not auth/allowlist.", file=sys.stderr)
+    platform = _prompt("Wake platform (discord/telegram/custom/none)", inferred.get("platform", "discord")).strip()
+    if platform == "none":
+        return {}
+    defaults = {
+        "platform": platform,
+        "chat_id": _prompt("Wake chat/channel ID", inferred.get("chat_id", "")).strip(),
+        "chat_type": _prompt("Wake chat type", inferred.get("chat_type", "group" if platform == "discord" else "dm")).strip() or "dm",
+        "actor_id": _prompt("Wake actor ID (your Discord/Telegram user ID; session selector, not auth)", inferred.get("actor_id", "")).strip(),
+        "actor_name": _prompt("Wake actor name", inferred.get("actor_name", "user")).strip() or "user",
+    }
+    if platform == "telegram":
+        defaults["thread_id"] = _prompt("Telegram thread/topic ID (optional)", inferred.get("thread_id", "")).strip()
+    elif inferred.get("thread_id"):
+        defaults["thread_id"] = inferred["thread_id"]
+    return defaults
+
+
 def command_install(args: argparse.Namespace) -> int:
+    if args.multi:
+        return command_install_multi(args)
     home = resolve_home(args)
     if not args.dry_run and not args.yes and not sys.stdin.isatty():
         raise CliError("Refusing destructive install in non-interactive mode without --yes")
@@ -304,6 +382,53 @@ def command_install(args: argparse.Namespace) -> int:
             confirm_fn=_confirm,
         )
     payload = install_payload(home, dry_run=args.dry_run, answers=answers)
+    print_result(payload, args.json or True)
+    return 0
+
+
+def command_install_multi(args: argparse.Namespace) -> int:
+    if not args.dry_run and not args.yes and not sys.stdin.isatty():
+        raise CliError("Refusing destructive multi-profile install in non-interactive mode without --yes")
+    root_home = default_home().resolve()
+    profiles = discover_profiles(root_home)
+    if not profiles:
+        raise CliError("No Hermes profiles found")
+    if args.profile:
+        wanted = {item.strip() for item in args.profile.split(",") if item.strip()}
+        selected = [profile for profile in profiles if profile.name in wanted]
+    elif sys.stdin.isatty() and not args.yes:
+        selected = _prompt_multi_profile_selection(profiles)
+    else:
+        selected = profiles if len(profiles) <= 2 else [profile for profile in profiles if profile.name == "default"]
+    if not selected:
+        raise CliError("No matching Hermes profiles selected")
+    inferred_wake = {}
+    for profile in selected:
+        inferred_wake = infer_wake_session_from_history(profile.home)
+        if inferred_wake:
+            break
+    wake_defaults = _wake_defaults_from_prompt(inferred_wake) if sys.stdin.isatty() and not args.yes else inferred_wake
+    generated = build_generated_profiles(selected, wake_defaults=wake_defaults)
+    preview = preview_generated_profiles(generated)
+    if sys.stdin.isatty() and not args.yes:
+        print("A2A install preview:", file=sys.stderr)
+        for line in preview:
+            print(f"  - {line}", file=sys.stderr)
+        if not args.dry_run and not _confirm("Apply this multi-profile A2A config", False):
+            raise CliError("Install cancelled")
+    results = []
+    for item in generated:
+        results.append(install_payload(item.source.home, dry_run=args.dry_run, answers=item.answers, write_state_manifest=not args.dry_run))
+    payload = {
+        "command": "install",
+        "mode": "multi-profile",
+        "dry_run": args.dry_run,
+        "changed": any(result.get("changed") for result in results),
+        "restart_required": not args.dry_run,
+        "profiles": [profile_payload(item.source.home) for item in generated],
+        "preview": preview,
+        "results": results,
+    }
     print_result(payload, args.json or True)
     return 0
 
@@ -411,6 +536,8 @@ def build_parser() -> argparse.ArgumentParser:
         if name in {"install", "update", "uninstall"}:
             cmd.add_argument("--dry-run", action="store_true")
             cmd.add_argument("--yes", action="store_true")
+        if name == "install":
+            cmd.add_argument("--multi", action="store_true", help="configure multiple Hermes profiles and connect them")
         if name == "update":
             cmd.add_argument("--to", dest="target_version")
         cmd.set_defaults(func=handler)

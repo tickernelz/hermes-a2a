@@ -8,41 +8,14 @@ a2a:
     name: primary_agent
     description: Primary Hermes A2A profile
   server:
-    host: 127.0.0.1
     port: 41731
-    public_url: http://127.0.0.1:41731
-    require_auth: true
     auth_token: "[REDACTED]"
   wake:
-    enabled: true
     port: 47644
     secret: "[REDACTED]"
-    route: a2a_trigger
-    prompt: "[A2A trigger]"
-    mode: owner_session
-    session:
+    session_ref:
       platform: discord
       chat_id: "<discord-channel-or-thread-id>"
-      chat_type: group
-      actor:
-        id: "<discord-user-id>"
-        name: "<display-name>"
-  dashboard:
-    enabled: true
-    route: a2a_dashboard
-  runtime:
-    sync_response_timeout_seconds: 120
-    active_task_timeout_seconds: 7200
-    max_pending_tasks: 10
-  security:
-    allow_unconfigured_urls: false
-    redact_outbound: true
-    max_message_chars: 50000
-    max_response_chars: 100000
-    rate_limit_per_minute: 20
-    max_request_bytes: 1048576
-    max_raw_part_bytes: 262144
-    max_parts: 20
   agents:
   - name: reviewer_agent
     url: http://127.0.0.1:41732
@@ -51,3 +24,26 @@ a2a:
     enabled: true
     tags: [local]
     trust_level: trusted
+
+# Generated compatibility output, not canonical user input. The installer/migration
+# regenerates this from a2a.wake.session_ref plus Hermes session history.
+webhook:
+  enabled: true
+  extra:
+    port: 47644
+    routes:
+      a2a_trigger:
+        secret: "[REDACTED]"
+        prompt: "[A2A trigger]"
+        deliver: discord
+        deliver_extra:
+          chat_id: "<discord-channel-or-thread-id>"
+        source:
+          platform: discord
+          chat_type: group
+          chat_id: "<discord-channel-or-thread-id>"
+          user_id: "<derived-from-session-history>"
+          user_name: "<derived-from-session-history>"
+      a2a_dashboard:
+        secret: "[REDACTED]"
+        prompt: "[A2A dashboard]"

@@ -59,25 +59,26 @@ def legacy_route(cfg: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
-def route_session(route: dict[str, Any]) -> dict[str, Any]:
+def route_session_ref(route: dict[str, Any]) -> dict[str, Any]:
     source = route.get("source") if isinstance(route.get("source"), dict) else {}
     extra = route.get("deliver_extra") if isinstance(route.get("deliver_extra"), dict) else {}
     platform = str(source.get("platform") or route.get("deliver") or "").strip()
     chat_id = str(source.get("chat_id") or extra.get("chat_id") or "").strip()
     if not platform or not chat_id:
         return {}
-    session: dict[str, Any] = {
-        "platform": platform,
-        "chat_id": chat_id,
-        "chat_type": str(source.get("chat_type") or "dm"),
-        "actor": {
-            "id": str(source.get("user_id") or chat_id),
-            "name": str(source.get("user_name") or "user"),
-        },
-    }
+    ref: dict[str, Any] = {"platform": platform, "chat_id": chat_id}
     thread_id = source.get("thread_id") if source.get("thread_id") not in (None, "") else extra.get("thread_id")
     if thread_id not in (None, ""):
-        session["thread_id"] = thread_id
+        ref["thread_id"] = thread_id
+    return ref
+
+
+def route_resolved_session(route: dict[str, Any]) -> dict[str, Any]:
+    source = route.get("source") if isinstance(route.get("source"), dict) else {}
+    ref = route_session_ref(route)
+    if not ref or not source.get("user_id"):
+        return {}
+    session = {**ref, "chat_type": str(source.get("chat_type") or "dm"), "actor": {"id": str(source.get("user_id")), "name": str(source.get("user_name") or "user")}}
     return session
 
 
@@ -124,32 +125,30 @@ def build_canonical_config(cfg: dict[str, Any], env: dict[str, str]) -> tuple[di
         canonical_a2a["server"]["public_url"] = f"http://{canonical_a2a['server']['host']}:{canonical_a2a['server']['port']}"
     wake = canonical_a2a.get("wake") if isinstance(canonical_a2a.get("wake"), dict) else {}
     canonical_wake = {
-        "enabled": True,
         "port": int(env.get("WEBHOOK_PORT") or webhook_extra.get("port") or wake.get("port") or 47644),
         "secret": wake.get("secret") or wake_secret,
-        "route": wake.get("route") or "a2a_trigger",
-        "prompt": wake.get("prompt") or route.get("prompt") or "[A2A trigger]",
-        "mode": wake.get("mode") or "owner_session",
     }
-    session = wake.get("session") if isinstance(wake.get("session"), dict) else route_session(route)
-    if session:
-        canonical_wake["session"] = session
+    session_ref = wake.get("session_ref") if isinstance(wake.get("session_ref"), dict) else None
+    if not session_ref:
+        legacy_session = wake.get("session") if isinstance(wake.get("session"), dict) else {}
+        session_ref = route_session_ref(route) or route_session_ref({"source": legacy_session})
+        if not session_ref and legacy_session.get("platform") and legacy_session.get("chat_id"):
+            session_ref = {"platform": legacy_session["platform"], "chat_id": legacy_session["chat_id"]}
+            if legacy_session.get("thread_id") not in (None, ""):
+                session_ref["thread_id"] = legacy_session["thread_id"]
+    if session_ref:
+        canonical_wake["session_ref"] = session_ref
+    route_source_a2a = dict(canonical_a2a)
+    resolved_session = route_resolved_session(route)
+    legacy_session = wake.get("session") if isinstance(wake.get("session"), dict) else {}
+    if not resolved_session and legacy_session.get("actor"):
+        resolved_session = legacy_session
+    if resolved_session:
+        route_source_a2a["wake"] = {**canonical_wake, "session": resolved_session}
     canonical_a2a["wake"] = canonical_wake
-    canonical_a2a["dashboard"] = {"enabled": True, "route": "a2a_dashboard"}
-    canonical_a2a.setdefault("runtime", {"sync_response_timeout_seconds": 120, "active_task_timeout_seconds": 7200, "max_pending_tasks": 10})
-    canonical_a2a.setdefault(
-        "security",
-        {
-            "allow_unconfigured_urls": False,
-            "redact_outbound": True,
-            "max_message_chars": 50000,
-            "max_response_chars": 100000,
-            "max_request_bytes": 1048576,
-            "max_raw_part_bytes": 262144,
-            "max_parts": 20,
-            "rate_limit_per_minute": 20,
-        },
-    )
+    canonical_a2a.pop("dashboard", None)
+    canonical_a2a.pop("runtime", None)
+    canonical_a2a.pop("security", None)
     remote_token_keys = set()
     agents = []
     for raw in canonical_a2a.get("agents", []) if isinstance(canonical_a2a.get("agents"), list) else []:
@@ -165,7 +164,7 @@ def build_canonical_config(cfg: dict[str, Any], env: dict[str, str]) -> tuple[di
     if agents:
         canonical_a2a["agents"] = agents
     canonical["a2a"] = canonical_a2a
-    routes = build_compat_webhook_routes(canonical_a2a)
+    routes = build_compat_webhook_routes(route_source_a2a)
     webhook = canonical.setdefault("webhook", {})
     webhook["enabled"] = True
     extra = webhook.setdefault("extra", {})

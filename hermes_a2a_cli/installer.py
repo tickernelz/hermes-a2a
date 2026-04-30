@@ -145,37 +145,289 @@ def bool_value(value: Any, default: bool = False) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _stringify_id(value: Any) -> str:
+    return str(value).strip() if value not in (None, "") else ""
+
+
+def _coerce_id(value: Any) -> Any:
+    text = _stringify_id(value)
+    return int(text) if text.isdigit() else text
+
+
+def _wake_session_ref_from_legacy_session(session: dict[str, Any]) -> Any:
+    platform = _stringify_id(session.get("platform"))
+    chat_id = _stringify_id(session.get("chat_id"))
+    if not platform or not chat_id:
+        return None
+    ref: dict[str, Any] = {"platform": platform, "chat_id": chat_id}
+    if session.get("thread_id") not in (None, ""):
+        ref["thread_id"] = _coerce_id(session.get("thread_id"))
+    return ref
+
+
+
+
+def _route_resolved_session(route: dict[str, Any]) -> dict[str, Any]:
+    source = route.get("source") if isinstance(route.get("source"), dict) else {}
+    extra = route.get("deliver_extra") if isinstance(route.get("deliver_extra"), dict) else {}
+    platform = _stringify_id(source.get("platform") or route.get("deliver"))
+    chat_id = _stringify_id(source.get("chat_id") or extra.get("chat_id"))
+    actor_id = _stringify_id(source.get("user_id"))
+    if not platform or not chat_id or not actor_id:
+        return {}
+    session: dict[str, Any] = {
+        "platform": platform,
+        "chat_id": chat_id,
+        "chat_type": _stringify_id(source.get("chat_type")) or "dm",
+        "actor": {"id": actor_id, "name": _stringify_id(source.get("user_name")) or "user"},
+    }
+    thread_id = source.get("thread_id") if source.get("thread_id") not in (None, "") else extra.get("thread_id")
+    if thread_id not in (None, ""):
+        session["thread_id"] = _coerce_id(thread_id)
+    return session
+
+
+def _existing_a2a_route(cfg: dict[str, Any]) -> dict[str, Any]:
+    for path in (("webhook", "extra", "routes"), ("platforms", "webhook", "extra", "routes")):
+        routes = _get_nested(cfg, path)
+        if isinstance(routes, dict) and isinstance(routes.get("a2a_trigger"), dict):
+            return routes["a2a_trigger"]
+    return {}
+
+
+def _existing_resolved_wake_session(cfg: dict[str, Any], existing_wake: dict[str, Any]) -> dict[str, Any]:
+    session = existing_wake.get("session") if isinstance(existing_wake.get("session"), dict) else {}
+    actor = session.get("actor") if isinstance(session.get("actor"), dict) else {}
+    if session.get("platform") and session.get("chat_id") and actor.get("id"):
+        return dict(session)
+    return _route_resolved_session(_existing_a2a_route(cfg))
+
+def resolve_wake_session(config_or_a2a: dict[str, Any]) -> dict[str, Any]:
+    a2a = config_or_a2a.get("a2a") if isinstance(config_or_a2a.get("a2a"), dict) else config_or_a2a
+    wake = a2a.get("wake") if isinstance(a2a, dict) and isinstance(a2a.get("wake"), dict) else {}
+    session = wake.get("session") if isinstance(wake.get("session"), dict) else {}
+    if session:
+        return dict(session)
+    ref = wake.get("session_ref")
+    if ref in (None, "", "none", False):
+        return {}
+    if ref == "latest":
+        try:
+            from .multi_install import infer_wake_session_from_history
+
+            inferred = infer_wake_session_from_history(Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))))
+        except Exception:
+            inferred = {}
+        if not inferred:
+            return {}
+        session = {
+            "platform": inferred.get("platform"),
+            "chat_id": inferred.get("chat_id"),
+            "chat_type": inferred.get("chat_type") or "dm",
+            "actor": {"id": inferred.get("actor_id"), "name": inferred.get("actor_name") or "user"},
+        }
+        if inferred.get("thread_id") not in (None, ""):
+            session["thread_id"] = _coerce_id(inferred.get("thread_id"))
+        return session
+    if not isinstance(ref, dict):
+        return {}
+    platform = _stringify_id(ref.get("platform"))
+    chat_id = _stringify_id(ref.get("chat_id"))
+    if not platform or not chat_id:
+        return {}
+    session = {"platform": platform, "chat_id": chat_id, "chat_type": _stringify_id(ref.get("chat_type")) or "dm"}
+    if ref.get("thread_id") not in (None, ""):
+        session["thread_id"] = _coerce_id(ref.get("thread_id"))
+    actor = ref.get("actor") if isinstance(ref.get("actor"), dict) else {}
+    actor_id = _stringify_id(actor.get("id"))
+    actor_name = _stringify_id(actor.get("name")) or "user"
+    if not actor_id:
+        try:
+            from .multi_install import infer_wake_session_from_history
+
+            inferred = infer_wake_session_from_history(Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))), preferred_platform=platform)
+        except Exception:
+            inferred = {}
+        if inferred and inferred.get("chat_id") == chat_id:
+            actor_id = inferred.get("actor_id", "")
+            actor_name = inferred.get("actor_name") or actor_name
+            session["chat_type"] = inferred.get("chat_type") or session["chat_type"]
+            if "thread_id" not in session and inferred.get("thread_id") not in (None, ""):
+                session["thread_id"] = _coerce_id(inferred.get("thread_id"))
+    if not actor_id:
+        return {}
+    session["actor"] = {"id": actor_id, "name": actor_name}
+    return session
+
+
+def is_local_port_available(port: int, host: str = "127.0.0.1") -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind((host, port))
+        except OSError:
+            return False
+    return True
+
+
+def _profile_root(home: Path) -> Path:
+    home = home.expanduser().resolve()
+    if home.parent.name == "profiles":
+        return home.parent.parent
+    return home
+
+
+def _profile_config_paths(home: Path) -> list[Path]:
+    root = _profile_root(home)
+    paths = [root / "config.yaml"]
+    profiles_root = root / "profiles"
+    if profiles_root.is_dir():
+        paths.extend(sorted(child / "config.yaml" for child in profiles_root.iterdir() if child.is_dir()))
+    return paths
+
+
+def _get_nested(mapping: dict[str, Any], path: tuple[str, ...]) -> Any:
+    current: Any = mapping
+    for key in path:
+        current = current.get(key) if isinstance(current, dict) else None
+    return current
+
+
+def _read_env_lines(env_path: Path) -> list[str]:
+    return env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
+
+
+def _env_line_value(lines: list[str], key: str) -> str:
+    prefix = f"{key}="
+    for line in lines:
+        if line.startswith(prefix):
+            return line.split("=", 1)[1].strip()
+    return ""
+
+
+def _configured_profile_port(config_path: Path, kind: str) -> int | None:
+    if not config_path.exists():
+        return None
+    try:
+        cfg = load_config(config_path)
+    except Exception:
+        return None
+    candidates: list[Any]
+    if kind == "a2a":
+        candidates = [_get_nested(cfg, ("a2a", "server", "port"))]
+        env_key = "A2A_PORT"
+    else:
+        candidates = [
+            _get_nested(cfg, ("a2a", "wake", "port")),
+            _get_nested(cfg, ("platforms", "webhook", "extra", "port")),
+            _get_nested(cfg, ("webhook", "extra", "port")),
+        ]
+        env_key = "WEBHOOK_PORT"
+    env_value = _env_line_value(_read_env_lines(config_path.parent / ".env"), env_key)
+    if env_value:
+        candidates.append(env_value)
+    for value in candidates:
+        if value in (None, ""):
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _used_profile_ports(home: Path, kind: str) -> set[int]:
+    used: set[int] = set()
+    current = home.expanduser().resolve() / "config.yaml"
+    for config_path in _profile_config_paths(home):
+        if config_path.resolve() == current or not config_path.exists():
+            continue
+        port = _configured_profile_port(config_path, kind)
+        if port is not None:
+            used.add(port)
+    return used
+
+
+def choose_profile_ports(homes: list[Path], kind: str, *, start: int, check_socket: bool = True) -> dict[str, int]:
+    """Choose deterministic ports for a batch install.
+
+    Existing configured ports on selected homes are preserved when they are not
+    duplicated by another profile. New/missing/conflicting ports are allocated
+    sequentially from ``start`` while respecting sibling profile configs and
+    currently occupied sockets.
+    """
+    resolved = [home.expanduser().resolve() for home in homes]
+    selected_configs = {home / "config.yaml" for home in resolved}
+    configured_by_path: dict[Path, int | None] = {
+        config_path: _configured_profile_port(config_path, kind)
+        for home in resolved
+        for config_path in [home / "config.yaml"]
+    }
+    used: set[int] = set()
+    for home in resolved:
+        for config_path in _profile_config_paths(home):
+            config_path = config_path.resolve()
+            if config_path in selected_configs:
+                continue
+            port = _configured_profile_port(config_path, kind)
+            if port is not None:
+                used.add(port)
+    duplicate_selected_ports = {
+        port
+        for port in configured_by_path.values()
+        if port is not None and list(configured_by_path.values()).count(port) > 1
+    }
+    chosen: dict[str, int] = {}
+    for home in resolved:
+        config_path = home / "config.yaml"
+        current = configured_by_path.get(config_path)
+        if current is not None and current not in used and current not in duplicate_selected_ports:
+            chosen[str(home)] = current
+            used.add(current)
+            continue
+        port = _first_available_port(start, used, check_socket=check_socket)
+        chosen[str(home)] = port
+        used.add(port)
+    return chosen
+
+
+def _first_available_port(start: int, used: set[int], *, check_socket: bool = True) -> int:
+    for port in range(start, 65535):
+        if port in used:
+            continue
+        if not check_socket or is_local_port_available(port):
+            return port
+    raise InstallError(f"could not find an available local port starting at {start}")
+
+
+def choose_a2a_port(home: Path, config: dict[str, Any], existing_env: list[str]) -> int:
+    raw = os.environ.get("A2A_PORT", "").strip()
+    if raw:
+        return int(raw)
+    current = _get_nested(config, ("a2a", "server", "port"))
+    if current not in (None, ""):
+        return int(current)
+    env_value = _env_line_value(existing_env, "A2A_PORT")
+    if env_value:
+        return int(env_value)
+    return _first_available_port(41731, _used_profile_ports(home, "a2a"))
+
+
 def choose_webhook_port(home: Path, config: dict[str, Any], existing_env: list[str]) -> int:
     raw = os.environ.get("WEBHOOK_PORT", "").strip() or os.environ.get("A2A_WEBHOOK_PORT", "").strip()
     if raw:
         return int(raw)
 
-    for section_path in (("platforms", "webhook", "extra"), ("webhook", "extra")):
-        current: Any = config
-        for key in section_path:
-            current = current.get(key) if isinstance(current, dict) else None
+    for section_path in (("a2a", "wake"), ("platforms", "webhook", "extra"), ("webhook", "extra")):
+        current = _get_nested(config, section_path)
         if isinstance(current, dict) and current.get("port") not in (None, ""):
             return int(current["port"])
 
-    for line in existing_env:
-        if line.startswith("WEBHOOK_PORT=") and line.split("=", 1)[1].strip():
-            return int(line.split("=", 1)[1])
+    env_value = _env_line_value(existing_env, "WEBHOOK_PORT")
+    if env_value:
+        return int(env_value)
 
-    base_port = 47644
-    if home.name != ".hermes":
-        profile_name = home.name
-        if profile_name:
-            base_port += 1 + (sum(profile_name.encode("utf-8")) % 1000)
-
-    for port in range(base_port, min(base_port + 1000, 65535)):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            try:
-                sock.bind(("127.0.0.1", port))
-            except OSError:
-                continue
-            return port
-    raise InstallError("could not find an available local webhook port")
+    return _first_available_port(47644, _used_profile_ports(home, "webhook"))
 
 
 def explicit_a2a_keys() -> set[str]:
@@ -199,7 +451,7 @@ def build_compat_webhook_routes(a2a: dict[str, Any]) -> dict[str, Any]:
     secret = str(wake.get("secret") or "")
     route_name = str(wake.get("route") or "a2a_trigger").strip() or "a2a_trigger"
     trigger: dict[str, Any] = {"secret": secret, "prompt": str(wake.get("prompt") or "[A2A trigger]")}
-    session = wake.get("session") if isinstance(wake.get("session"), dict) else {}
+    session = resolve_wake_session(a2a)
     platform = str(session.get("platform") or "").strip()
     chat_id = str(session.get("chat_id") or "").strip()
     if platform and chat_id:
@@ -207,16 +459,18 @@ def build_compat_webhook_routes(a2a: dict[str, Any]) -> dict[str, Any]:
         if session.get("thread_id") not in (None, ""):
             deliver_extra["thread_id"] = session["thread_id"]
         actor = session.get("actor") if isinstance(session.get("actor"), dict) else {}
-        source: dict[str, Any] = {
-            "platform": platform,
-            "chat_type": str(session.get("chat_type") or "dm"),
-            "chat_id": chat_id,
-            "user_id": str(actor.get("id") or chat_id),
-            "user_name": str(actor.get("name") or "user"),
-        }
-        if session.get("thread_id") not in (None, ""):
-            source["thread_id"] = session["thread_id"]
-        trigger.update({"deliver": platform, "deliver_extra": deliver_extra, "source": source})
+        actor_id = str(actor.get("id") or "").strip()
+        if actor_id:
+            source: dict[str, Any] = {
+                "platform": platform,
+                "chat_type": str(session.get("chat_type") or "dm"),
+                "chat_id": chat_id,
+                "user_id": actor_id,
+                "user_name": str(actor.get("name") or "user"),
+            }
+            if session.get("thread_id") not in (None, ""):
+                source["thread_id"] = session["thread_id"]
+            trigger.update({"deliver": platform, "deliver_extra": deliver_extra, "source": source})
     routes = {route_name: trigger}
     if dashboard.get("enabled", True) is not False:
         routes[str(dashboard.get("route") or "a2a_dashboard")] = {"secret": secret, "prompt": "[A2A dashboard]"}
@@ -247,7 +501,7 @@ def install_profile(home: Path, source_dir: Path, dashboard_dir: Path, *, dry_ru
     explicit_keys = explicit_a2a_keys()
 
     default_host = os.environ.get("A2A_HOST") or "127.0.0.1"
-    default_port = os.environ.get("A2A_PORT") or "41731"
+    default_port = str(choose_a2a_port(home, cfg, existing_env))
     legacy_identity_from_env = any(line.startswith("A2A_AGENT_NAME=") or line.startswith("A2A_AGENT_DESCRIPTION=") for line in existing_env)
     a2a_host = env_or_config(existing_env, "A2A_HOST", existing_server.get("host"), default_host, explicit_keys)
     a2a_port = env_or_config(existing_env, "A2A_PORT", existing_server.get("port"), default_port, explicit_keys)
@@ -287,14 +541,17 @@ def install_profile(home: Path, source_dir: Path, dashboard_dir: Path, *, dry_ru
     if answers is not None:
         a2a_host = answers.host
         a2a_port = str(answers.port)
-        a2a_public_url = answers.public_url.rstrip("/")
+        default_answer_url = f"http://{answers.host}:{answers.port}"
+        a2a_public_url = (answers.public_url or default_answer_url).rstrip("/")
         a2a_agent_name = answers.identity_name
         a2a_agent_description = answers.identity_description
         a2a_require_auth = "true" if answers.require_auth else "false"
         webhook_port = answers.webhook_port
     existing_wake = existing_a2a.get("wake", {}) if isinstance(existing_a2a.get("wake"), dict) else {}
-    secret = str(existing_wake.get("secret") or "").strip() or env_value(existing_env, "A2A_WEBHOOK_SECRET", lambda: secrets.token_hex(24))
-    auth_token = str(existing_server.get("auth_token") or "").strip() or env_value(existing_env, "A2A_AUTH_TOKEN", lambda: secrets.token_hex(24))
+    answer_secret = str(getattr(answers, "wake_secret", "") or "").strip() if answers is not None else ""
+    answer_auth_token = str(getattr(answers, "auth_token", "") or "").strip() if answers is not None else ""
+    secret = answer_secret or str(existing_wake.get("secret") or "").strip() or env_value(existing_env, "A2A_WEBHOOK_SECRET", lambda: secrets.token_hex(24))
+    auth_token = answer_auth_token or str(existing_server.get("auth_token") or "").strip() or env_value(existing_env, "A2A_AUTH_TOKEN", lambda: secrets.token_hex(24))
     remote_token_env = os.environ.get("A2A_REMOTE_TOKEN_ENV", "").strip()
     remote_token = env_value(existing_env, remote_token_env, lambda: secrets.token_hex(24)) if remote_token_env else ""
 
@@ -361,47 +618,69 @@ def install_profile(home: Path, source_dir: Path, dashboard_dir: Path, *, dry_ru
         "name": a2a_agent_name,
         "description": a2a_agent_description,
     }
-    a2a["server"] = {
-        **(a2a.get("server") if isinstance(a2a.get("server"), dict) else {}),
-        "host": a2a_host,
-        "port": int(a2a_port),
-        "public_url": a2a_public_url,
-        "require_auth": bool_value(a2a_require_auth, True),
-        **({"auth_token_env": "A2A_AUTH_TOKEN"} if answers is not None and getattr(answers, "secret_store", "config") == "env" else {"auth_token": auth_token}),
-    }
-    a2a["wake"] = {
-        **(a2a.get("wake") if isinstance(a2a.get("wake"), dict) else {}),
-        "enabled": True,
-        "port": webhook_port,
-        **({"secret_env": "A2A_WEBHOOK_SECRET"} if answers is not None and getattr(answers, "secret_store", "config") == "env" else {"secret": secret}),
-        "route": "a2a_trigger",
-        "prompt": "[A2A trigger]",
-        "mode": "owner_session",
-    }
+    server_section = {"port": int(a2a_port), **({"auth_token_env": "A2A_AUTH_TOKEN"} if answers is not None and getattr(answers, "secret_store", "config") == "env" else {"auth_token": auth_token})}
+    if a2a_host != "127.0.0.1":
+        server_section["host"] = a2a_host
+    default_public_url = f"http://{a2a_host}:{a2a_port}".rstrip("/")
+    if a2a_public_url != default_public_url:
+        server_section["public_url"] = a2a_public_url
+    if bool_value(a2a_require_auth, True) is not True:
+        server_section["require_auth"] = bool_value(a2a_require_auth, True)
+    a2a["server"] = server_section
+    existing_session_ref = existing_wake.get("session_ref") if isinstance(existing_wake.get("session_ref"), dict) else None
+    existing_resolved_session = _existing_resolved_wake_session(cfg, existing_wake)
+    a2a["wake"] = {"port": webhook_port, **({"secret_env": "A2A_WEBHOOK_SECRET"} if answers is not None and getattr(answers, "secret_store", "config") == "env" else {"secret": secret})}
+    if answers is None and existing_session_ref:
+        a2a["wake"]["session_ref"] = dict(existing_session_ref)
+        if existing_resolved_session:
+            a2a["wake"]["_resolved_session"] = existing_resolved_session
+    elif answers is None and existing_resolved_session:
+        session_ref = _wake_session_ref_from_legacy_session(existing_resolved_session)
+        if session_ref:
+            a2a["wake"]["session_ref"] = session_ref
+            a2a["wake"]["_resolved_session"] = existing_resolved_session
     if answers is not None and getattr(answers, "wake_platform", "") and getattr(answers, "wake_chat_id", ""):
-        a2a["wake"]["session"] = {
+        session_ref = {"platform": answers.wake_platform, "chat_id": answers.wake_chat_id}
+        if getattr(answers, "wake_thread_id", ""):
+            session_ref["thread_id"] = int(answers.wake_thread_id) if str(answers.wake_thread_id).isdigit() else answers.wake_thread_id
+        a2a["wake"]["session_ref"] = session_ref
+        resolved_session = {
             "platform": answers.wake_platform,
             "chat_id": answers.wake_chat_id,
             "chat_type": answers.wake_chat_type or "dm",
             "actor": {
-                "id": answers.wake_actor_id or answers.wake_chat_id,
+                "id": answers.wake_actor_id or "",
                 "name": answers.wake_actor_name or "user",
             },
         }
         if getattr(answers, "wake_thread_id", ""):
-            a2a["wake"]["session"]["thread_id"] = int(answers.wake_thread_id) if str(answers.wake_thread_id).isdigit() else answers.wake_thread_id
+            resolved_session["thread_id"] = session_ref["thread_id"]
+        a2a["wake"]["_resolved_session"] = resolved_session
     elif platform and chat_id:
-        a2a["wake"]["session"] = {
+        a2a["wake"]["session_ref"] = {"platform": platform, "chat_id": chat_id}
+        thread_id = os.environ.get("A2A_HOME_THREAD_ID", "").strip()
+        if thread_id:
+            a2a["wake"]["session_ref"]["thread_id"] = int(thread_id) if thread_id.isdigit() else thread_id
+        legacy_session = {
             "platform": platform,
             "chat_id": chat_id,
             "chat_type": os.environ.get("A2A_HOME_CHAT_TYPE", "dm").strip() or "dm",
             "actor": {
-                "id": os.environ.get("A2A_HOME_USER_ID", "").strip() or chat_id,
+                "id": os.environ.get("A2A_HOME_USER_ID", "").strip(),
                 "name": os.environ.get("A2A_HOME_USER_NAME", "").strip() or "user",
             },
         }
-    a2a["dashboard"] = {**(a2a.get("dashboard") if isinstance(a2a.get("dashboard"), dict) else {}), "enabled": True, "route": "a2a_dashboard"}
-    routes = build_compat_webhook_routes(a2a)
+        if thread_id:
+            legacy_session["thread_id"] = a2a["wake"]["session_ref"]["thread_id"]
+        a2a["wake"]["_resolved_session"] = legacy_session
+    a2a.pop("dashboard", None)
+    a2a.pop("runtime", None)
+    a2a.pop("security", None)
+    generated_wake_session = a2a.get("wake", {}).pop("_resolved_session", None) if isinstance(a2a.get("wake"), dict) else None
+    route_source_a2a = dict(a2a)
+    if generated_wake_session:
+        route_source_a2a["wake"] = {**a2a["wake"], "session": generated_wake_session}
+    routes = build_compat_webhook_routes(route_source_a2a)
 
     for root_key in ("webhook",):
         webhook = cfg.setdefault(root_key, {})
@@ -419,7 +698,7 @@ def install_profile(home: Path, source_dir: Path, dashboard_dir: Path, *, dry_ru
         if not isinstance(routes, dict):
             routes = {}
             extra["routes"] = routes
-        compat_routes = build_compat_webhook_routes(a2a)
+        compat_routes = build_compat_webhook_routes(route_source_a2a)
         if not compat_routes.get("a2a_trigger", {}).get("secret"):
             compat_routes["a2a_trigger"]["secret"] = secret
         if "a2a_dashboard" in compat_routes and not compat_routes["a2a_dashboard"].get("secret"):
@@ -450,36 +729,73 @@ def install_profile(home: Path, source_dir: Path, dashboard_dir: Path, *, dry_ru
         platform_routes.pop(route_name, None)
     platform_routes.update(routes)
 
-    security = a2a.setdefault("security", {})
-    if not isinstance(security, dict):
-        security = {}
-        a2a["security"] = security
-    for key, value in {
-        "allow_unconfigured_urls": False,
-        "redact_outbound": True,
-        "max_message_chars": 50000,
-        "max_response_chars": 100000,
-        "max_request_bytes": 1048576,
-        "max_raw_part_bytes": 262144,
-        "max_parts": 20,
-        "rate_limit_per_minute": 20,
-    }.items():
-        security.setdefault(key, value)
-
+    remote_specs: list[dict[str, Any]] = []
+    if answers is not None:
+        remote_specs.extend(getattr(answers, "remote_agents", []) or [])
     remote_name = os.environ.get("A2A_REMOTE_NAME", "").strip()
     remote_url = os.environ.get("A2A_REMOTE_URL", "").strip().rstrip("/")
     if remote_name and remote_url:
+        env_agent = {"name": remote_name, "url": remote_url, "description": os.environ.get("A2A_REMOTE_DESCRIPTION", "").strip(), "enabled": True, "tags": ["local"], "trust_level": "trusted"}
+        if secret_store == "env" and remote_token_env:
+            env_agent["auth_token_env"] = remote_token_env
+        elif remote_token:
+            env_agent["auth_token"] = remote_token
+        remote_specs.append(env_agent)
+    for raw in remote_specs:
+        if not isinstance(raw, dict):
+            continue
+        agent_name = str(raw.get("name") or "").strip()
+        agent_url = str(raw.get("url") or "").strip().rstrip("/")
+        if not agent_name or not agent_url:
+            continue
         agents = a2a.setdefault("agents", [])
         if not isinstance(agents, list):
             agents = []
             a2a["agents"] = agents
-        agents[:] = [agent for agent in agents if not (isinstance(agent, dict) and agent.get("name") == remote_name)]
-        agent = {"name": remote_name, "url": remote_url, "description": os.environ.get("A2A_REMOTE_DESCRIPTION", "").strip(), "enabled": True, "tags": ["local"], "trust_level": "trusted"}
-        if secret_store == "env" and remote_token_env:
-            agent["auth_token_env"] = remote_token_env
-        elif remote_token:
-            agent["auth_token"] = remote_token
+        agents[:] = [agent for agent in agents if not (isinstance(agent, dict) and agent.get("name") == agent_name)]
+        agent = {
+            "name": agent_name,
+            "url": agent_url,
+            "description": str(raw.get("description") or "").strip(),
+            "enabled": raw.get("enabled", True) is not False,
+            "tags": raw.get("tags") if isinstance(raw.get("tags"), list) else ["local"],
+            "trust_level": str(raw.get("trust_level") or "trusted"),
+        }
+        if raw.get("auth_token_env"):
+            agent["auth_token_env"] = str(raw["auth_token_env"]).strip()
+        elif raw.get("auth_token"):
+            agent["auth_token"] = str(raw["auth_token"]).strip()
         agents.append(agent)
+
+    for raw in remote_specs:
+        reciprocal_home = str(raw.get("reciprocal_home") or "").strip() if isinstance(raw, dict) else ""
+        if not reciprocal_home or raw.get("reciprocal") is not True:
+            continue
+        reciprocal_path = Path(reciprocal_home).expanduser().resolve() / "config.yaml"
+        if not reciprocal_path.exists():
+            continue
+        reciprocal_cfg = load_config(reciprocal_path)
+        reciprocal_a2a = reciprocal_cfg.setdefault("a2a", {})
+        if not isinstance(reciprocal_a2a, dict):
+            reciprocal_a2a = {}
+            reciprocal_cfg["a2a"] = reciprocal_a2a
+        reciprocal_agents = reciprocal_a2a.setdefault("agents", [])
+        if not isinstance(reciprocal_agents, list):
+            reciprocal_agents = []
+            reciprocal_a2a["agents"] = reciprocal_agents
+        reciprocal_agents[:] = [agent for agent in reciprocal_agents if not (isinstance(agent, dict) and agent.get("name") == a2a_agent_name)]
+        reciprocal_agent = {
+            "name": a2a_agent_name,
+            "url": a2a_public_url,
+            "description": a2a_agent_description,
+            "enabled": True,
+            "tags": ["local"],
+            "trust_level": "trusted",
+            "auth_token": auth_token,
+        }
+        backup(reciprocal_path)
+        reciprocal_agents.append(reciprocal_agent)
+        write_text(reciprocal_path, dump_config(reciprocal_cfg))
 
     stale_a2a_env_keys = {
         "A2A_ENABLED",

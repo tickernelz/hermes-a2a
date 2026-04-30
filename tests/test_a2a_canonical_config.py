@@ -12,24 +12,15 @@ def test_canonical_identity_server_wake_and_agent_tokens(monkeypatch):
         "a2a": {
             "identity": {"name": "primary_agent", "description": "Primary profile"},
             "server": {
-                "host": "127.0.0.1",
                 "port": 41731,
-                "public_url": "http://127.0.0.1:41731",
-                "require_auth": True,
                 "auth_token": "server-token",
             },
             "wake": {
-                "enabled": True,
                 "port": 47644,
                 "secret": "wake-secret",
-                "route": "a2a_trigger",
-                "prompt": "[A2A trigger]",
-                "mode": "owner_session",
-                "session": {
+                "session_ref": {
                     "platform": "discord",
                     "chat_id": "1499099497572339904",
-                    "chat_type": "group",
-                    "actor": {"id": "287600440659410944", "name": "Owner"},
                 },
             },
             "agents": [
@@ -53,8 +44,9 @@ def test_canonical_identity_server_wake_and_agent_tokens(monkeypatch):
     assert server.auth_token == "server-token"
     assert wake.port == 47644
     assert wake.secret == "wake-secret"
-    assert wake.session["platform"] == "discord"
-    assert wake.session["actor"] == {"id": "287600440659410944", "name": "Owner"}
+    assert wake.session == {"platform": "discord", "chat_id": "1499099497572339904"}
+    assert server.public_url == "http://127.0.0.1:41731"
+    assert server.require_auth is True
     assert agents[0]["auth_token"] == "remote-token"
 
 

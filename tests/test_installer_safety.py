@@ -83,8 +83,8 @@ def test_install_preserves_existing_env_and_server_config_without_explicit_overr
     assert "A2A_REQUIRE_AUTH=false" not in env_text
     assert cfg["a2a"]["identity"]["name"] == "custom-agent"
     assert cfg["a2a"]["server"]["port"] == 49999
-    assert cfg["a2a"]["server"]["public_url"] == "http://127.0.0.1:49999"
-    assert cfg["a2a"]["server"]["require_auth"] is False
+    assert cfg["a2a"]["server"].get("public_url") in (None, "http://127.0.0.1:49999")
+    assert cfg["a2a"]["server"].get("require_auth") is False
 
 
 def test_install_explicit_env_overrides_existing_values(tmp_path):
@@ -117,8 +117,8 @@ def test_install_explicit_env_overrides_existing_values(tmp_path):
     assert "A2A_REQUIRE_AUTH=true" not in env_text
     assert cfg["a2a"]["identity"]["name"] == "new-agent"
     assert cfg["a2a"]["server"]["port"] == 45555
-    assert cfg["a2a"]["server"]["public_url"] == "http://127.0.0.1:45555"
-    assert cfg["a2a"]["server"]["require_auth"] is True
+    assert cfg["a2a"]["server"].get("public_url") in (None, "http://127.0.0.1:45555")
+    assert cfg["a2a"]["server"].get("require_auth") in (None, True)
 
 
 def test_install_creates_dashboard_webhook_route(tmp_path):

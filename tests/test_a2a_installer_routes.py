@@ -80,3 +80,29 @@ def test_dump_config_does_not_emit_yaml_aliases_for_shared_routes():
     assert "*id" not in dumped
     loaded = yaml.safe_load(dumped)
     assert loaded["webhook"]["extra"]["routes"] == loaded["platforms"]["webhook"]["extra"]["routes"]
+
+
+def test_session_ref_alone_does_not_guess_actor_for_compat_route():
+    routes = build_compat_webhook_routes({"wake": {"secret": "***", "session_ref": {"platform": "discord", "chat_id": "chat-1"}}})
+
+    assert routes["a2a_trigger"] == {"secret": "***", "prompt": "[A2A trigger]"}
+
+
+def test_generated_resolved_session_can_create_compat_route_without_canonical_actor():
+    a2a = {
+        "wake": {
+            "secret": "***",
+            "session_ref": {"platform": "discord", "chat_id": "chat-1"},
+            "session": {
+                "platform": "discord",
+                "chat_id": "chat-1",
+                "chat_type": "group",
+                "actor": {"id": "user-1", "name": "Owner"},
+            },
+        }
+    }
+
+    route = build_compat_webhook_routes(a2a)["a2a_trigger"]
+
+    assert route["deliver"] == "discord"
+    assert route["source"]["user_id"] == "user-1"

@@ -6,6 +6,9 @@ from pathlib import Path
 
 import yaml
 
+from hermes_a2a_cli.installer import choose_a2a_port, install_profile
+from hermes_a2a_cli.wizard import WizardAnswers
+
 ROOT = Path(__file__).resolve().parent.parent
 INSTALL = ROOT / "install.sh"
 UNINSTALL = ROOT / "uninstall.sh"
@@ -17,6 +20,8 @@ def run_install(home: Path | None, *args: str, **env_overrides):
         env.pop("HERMES_HOME", None)
     else:
         env["HERMES_HOME"] = str(home)
+    if "HOME" in env_overrides and "HERMES_A2A_ROOT_HOME" not in env_overrides:
+        env["HERMES_A2A_ROOT_HOME"] = str(Path(env_overrides["HOME"]) / ".hermes")
     env.update({
         "HERMES_PYTHON": sys.executable,
         "A2A_PORT": "18081",
@@ -51,6 +56,8 @@ def run_uninstall(home: Path | None, *args: str, **env_overrides):
         env.pop("HERMES_HOME", None)
     else:
         env["HERMES_HOME"] = str(home)
+    if "HOME" in env_overrides and "HERMES_A2A_ROOT_HOME" not in env_overrides:
+        env["HERMES_A2A_ROOT_HOME"] = str(Path(env_overrides["HOME"]) / ".hermes")
     env.update(env_overrides)
     return subprocess.run(
         ["bash", str(UNINSTALL), *args],
@@ -64,6 +71,202 @@ def run_uninstall(home: Path | None, *args: str, **env_overrides):
 
 def read_config(home: Path):
     return yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8")) or {}
+
+
+def test_choose_a2a_port_skips_unavailable_port(monkeypatch, tmp_path):
+    occupied = {41731}
+
+    def available(port):
+        return port not in occupied
+
+    monkeypatch.setattr("hermes_a2a_cli.installer.is_local_port_available", available)
+
+    assert choose_a2a_port(tmp_path / ".hermes" / "profiles" / "reviewer", {}, []) == 41732
+
+
+def test_install_profile_writes_selected_local_agent_and_reciprocal_link(tmp_path):
+    default_home = tmp_path / ".hermes"
+    yanto_home = default_home / "profiles" / "hermes_yanto_coder"
+    default_home.mkdir(parents=True)
+    yanto_home.mkdir(parents=True)
+    (default_home / "config.yaml").write_text(
+        """
+plugins:
+  enabled:
+    - a2a
+a2a:
+  enabled: true
+  identity:
+    name: jono
+    description: Jono profile
+  server:
+    host: 127.0.0.1
+    port: 41731
+    public_url: http://127.0.0.1:41731
+    require_auth: true
+    auth_token: jono-token
+""".lstrip(),
+        encoding="utf-8",
+    )
+    (yanto_home / "config.yaml").write_text("plugins: {}\n", encoding="utf-8")
+    answers = WizardAnswers(
+        identity_name="yanto_coder",
+        identity_description="Yanto profile",
+        host="127.0.0.1",
+        port=41732,
+        public_url="http://127.0.0.1:41732",
+        require_auth=True,
+        webhook_port=47645,
+        wake_enabled=False,
+        remote_agents=[
+            {
+                "name": "jono",
+                "url": "http://127.0.0.1:41731",
+                "description": "Jono profile",
+                "auth_token": "jono-token",
+                "reciprocal": True,
+                "reciprocal_home": str(default_home),
+            }
+        ],
+    )
+
+    result = install_profile(yanto_home, ROOT / "plugin", ROOT / "dashboard", answers=answers)
+
+    assert result["changed"] is True
+    yanto_cfg = read_config(yanto_home)
+    assert yanto_cfg["a2a"]["agents"] == [
+        {
+            "name": "jono",
+            "url": "http://127.0.0.1:41731",
+            "description": "Jono profile",
+            "enabled": True,
+            "tags": ["local"],
+            "trust_level": "trusted",
+            "auth_token": "jono-token",
+        }
+    ]
+    default_cfg = read_config(default_home)
+    assert default_cfg["a2a"]["agents"] == [
+        {
+            "name": "yanto_coder",
+            "url": "http://127.0.0.1:41732",
+            "description": "Yanto profile",
+            "enabled": True,
+            "tags": ["local"],
+            "trust_level": "trusted",
+            "auth_token": yanto_cfg["a2a"]["server"]["auth_token"],
+        }
+    ]
+
+
+def test_install_profile_preserves_existing_session_ref_and_regenerates_compat_route(tmp_path):
+    home = tmp_path / "profile"
+    home.mkdir()
+    (home / "config.yaml").write_text(
+        """
+plugins: {}
+a2a:
+  wake:
+    port: 47644
+    secret: sec
+    session_ref:
+      platform: discord
+      chat_id: chat-1
+webhook:
+  extra:
+    routes:
+      a2a_trigger:
+        secret: sec
+        prompt: "[A2A trigger]"
+        deliver: discord
+        deliver_extra:
+          chat_id: chat-1
+        source:
+          platform: discord
+          chat_type: group
+          chat_id: chat-1
+          user_id: user-1
+          user_name: Owner
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    install_profile(home, ROOT / "plugin", ROOT / "dashboard")
+
+    cfg = read_config(home)
+    assert cfg["a2a"]["wake"]["session_ref"] == {"platform": "discord", "chat_id": "chat-1"}
+    assert "session" not in cfg["a2a"]["wake"]
+    route = cfg["webhook"]["extra"]["routes"]["a2a_trigger"]
+    assert route["deliver"] == "discord"
+    assert route["source"]["user_id"] == "user-1"
+    assert route["source"]["user_name"] == "Owner"
+
+
+def test_install_profile_migrates_existing_legacy_session_to_session_ref(tmp_path):
+    home = tmp_path / "profile"
+    home.mkdir()
+    (home / "config.yaml").write_text(
+        """
+plugins: {}
+a2a:
+  wake:
+    port: 47644
+    secret: sec
+    session:
+      platform: discord
+      chat_id: chat-1
+      chat_type: group
+      actor:
+        id: user-1
+        name: Owner
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    install_profile(home, ROOT / "plugin", ROOT / "dashboard")
+
+    cfg = read_config(home)
+    assert cfg["a2a"]["wake"]["session_ref"] == {"platform": "discord", "chat_id": "chat-1"}
+    assert "session" not in cfg["a2a"]["wake"]
+    assert cfg["webhook"]["extra"]["routes"]["a2a_trigger"]["source"]["user_id"] == "user-1"
+
+
+def test_install_profile_wizard_answers_generate_compat_route_without_persisting_actor(tmp_path):
+    home = tmp_path / "profile"
+    home.mkdir()
+    (home / "config.yaml").write_text("plugins: {}\n", encoding="utf-8")
+    answers = WizardAnswers(
+        identity_name="primary_agent",
+        identity_description="Primary profile",
+        host="127.0.0.1",
+        port=41731,
+        public_url="http://127.0.0.1:41731",
+        require_auth=True,
+        webhook_port=47644,
+        wake_platform="discord",
+        wake_chat_id="chat-1",
+        wake_chat_type="thread",
+        wake_thread_id="thread-1",
+        wake_actor_id="user-1",
+        wake_actor_name="Owner",
+    )
+
+    install_profile(home, ROOT / "plugin", ROOT / "dashboard", answers=answers)
+
+    cfg = read_config(home)
+    assert cfg["a2a"]["wake"]["session_ref"] == {"platform": "discord", "chat_id": "chat-1", "thread_id": "thread-1"}
+    assert "session" not in cfg["a2a"]["wake"]
+    route = cfg["webhook"]["extra"]["routes"]["a2a_trigger"]
+    assert route["deliver"] == "discord"
+    assert route["deliver_extra"] == {"chat_id": "chat-1", "thread_id": "thread-1"}
+    assert route["source"] == {
+        "platform": "discord",
+        "chat_type": "thread",
+        "chat_id": "chat-1",
+        "user_id": "user-1",
+        "user_name": "Owner",
+        "thread_id": "thread-1",
+    }
 
 
 def test_install_autodetects_single_default_profile_without_hermes_home(tmp_path):
@@ -195,7 +398,12 @@ webhook:
     }
     assert cfg["a2a"]["enabled"] is True
     assert cfg["a2a"]["server"]["port"] == 18081
-    assert cfg["a2a"]["server"]["require_auth"] is True
+    assert cfg["a2a"].get("runtime") is None
+    assert cfg["a2a"].get("security") is None
+    assert cfg["a2a"].get("dashboard") is None
+    assert cfg["a2a"]["wake"]["session_ref"] == {"platform": "discord", "chat_id": "123456789012345678"}
+    assert "session" not in cfg["a2a"]["wake"]
+    assert cfg["a2a"]["server"].get("require_auth") is None
     assert len(cfg["a2a"]["agents"]) == 1
     assert cfg["a2a"]["agents"][0]["name"] == "reviewer_agent"
     assert cfg["a2a"]["agents"][0]["url"] == "http://127.0.0.1:18082"
@@ -226,7 +434,7 @@ webhook:
     assert (sibling / ".env").read_text(encoding="utf-8") == "SIBLING=untouched\n"
 
 
-def test_install_auto_chooses_distinct_webhook_port_for_named_profile(tmp_path):
+def test_install_auto_chooses_distinct_a2a_and_webhook_ports_for_named_profile(tmp_path):
     root_home = tmp_path / ".hermes"
     default_home = root_home
     profile_home = root_home / "profiles" / "reviewer"
@@ -235,24 +443,91 @@ def test_install_auto_chooses_distinct_webhook_port_for_named_profile(tmp_path):
     (default_home / "config.yaml").write_text("plugins: {}\n", encoding="utf-8")
     (profile_home / "config.yaml").write_text("plugins: {}\n", encoding="utf-8")
 
-    default_result = run_install(default_home, "--yes", WEBHOOK_PORT="", A2A_WEBHOOK_PORT="")
-    profile_result = run_install(None, "--profile", "reviewer", "--yes", HOME=str(tmp_path), WEBHOOK_PORT="", A2A_WEBHOOK_PORT="")
+    default_result = run_install(default_home, "--yes", WEBHOOK_PORT="", A2A_WEBHOOK_PORT="", A2A_PORT="", A2A_PUBLIC_URL="")
+    profile_result = run_install(None, "--profile", "reviewer", "--yes", HOME=str(tmp_path), WEBHOOK_PORT="", A2A_WEBHOOK_PORT="", A2A_PORT="", A2A_PUBLIC_URL="")
 
     assert default_result.returncode == 0, default_result.stderr
     assert profile_result.returncode == 0, profile_result.stderr
     default_cfg = read_config(default_home)
     profile_cfg = read_config(profile_home)
-    default_port = default_cfg["platforms"]["webhook"]["extra"]["port"]
-    profile_port = profile_cfg["platforms"]["webhook"]["extra"]["port"]
-    assert isinstance(default_port, int)
-    assert isinstance(profile_port, int)
-    assert default_port != profile_port
-    assert default_port == int(
+    default_a2a_port = default_cfg["a2a"]["server"]["port"]
+    profile_a2a_port = profile_cfg["a2a"]["server"]["port"]
+    default_webhook_port = default_cfg["platforms"]["webhook"]["extra"]["port"]
+    profile_webhook_port = profile_cfg["platforms"]["webhook"]["extra"]["port"]
+    assert isinstance(default_a2a_port, int)
+    assert profile_a2a_port == default_a2a_port + 1
+    assert isinstance(default_webhook_port, int)
+    assert profile_webhook_port == default_webhook_port + 1
+    assert profile_cfg["a2a"]["server"].get("public_url") in (None, f"http://127.0.0.1:{profile_a2a_port}")
+    assert default_webhook_port == int(
         next(line.split("=", 1)[1] for line in (default_home / ".env").read_text(encoding="utf-8").splitlines() if line.startswith("WEBHOOK_PORT="))
     )
-    assert profile_port == int(
+    assert profile_webhook_port == int(
         next(line.split("=", 1)[1] for line in (profile_home / ".env").read_text(encoding="utf-8").splitlines() if line.startswith("WEBHOOK_PORT="))
     )
+
+
+def test_install_multi_configures_two_profiles_with_reciprocal_agents(tmp_path):
+    root_home = tmp_path / ".hermes"
+    default_home = root_home
+    yanto_home = root_home / "profiles" / "hermes_yanto_coder"
+    default_home.mkdir(parents=True)
+    yanto_home.mkdir(parents=True)
+    (default_home / "config.yaml").write_text("plugins: {}\n", encoding="utf-8")
+    (yanto_home / "config.yaml").write_text("plugins: {}\n", encoding="utf-8")
+
+    result = run_install(
+        None,
+        "--multi",
+        "--profile",
+        "default,hermes_yanto_coder",
+        "--yes",
+        HOME=str(tmp_path),
+        WEBHOOK_PORT="",
+        A2A_WEBHOOK_PORT="",
+        A2A_PORT="",
+        A2A_PUBLIC_URL="",
+        A2A_REMOTE_NAME="",
+        A2A_REMOTE_URL="",
+        A2A_REMOTE_DESCRIPTION="",
+        A2A_REMOTE_TOKEN_ENV="",
+    )
+
+    assert result.returncode == 0, result.stderr
+    default_cfg = read_config(default_home)
+    yanto_cfg = read_config(yanto_home)
+    assert default_cfg["a2a"]["identity"]["name"] == "jono"
+    assert yanto_cfg["a2a"]["identity"]["name"] == "yanto_coder"
+    default_port = default_cfg["a2a"]["server"]["port"]
+    yanto_port = yanto_cfg["a2a"]["server"]["port"]
+    default_wake_port = default_cfg["platforms"]["webhook"]["extra"]["port"]
+    yanto_wake_port = yanto_cfg["platforms"]["webhook"]["extra"]["port"]
+    assert yanto_port == default_port + 1
+    assert yanto_wake_port == default_wake_port + 1
+    assert default_cfg["a2a"]["agents"] == [
+        {
+            "name": "yanto_coder",
+            "url": f"http://127.0.0.1:{yanto_port}",
+            "description": "yanto_coder Hermes profile",
+            "enabled": True,
+            "tags": ["local"],
+            "trust_level": "trusted",
+            "auth_token": yanto_cfg["a2a"]["server"]["auth_token"],
+        }
+    ]
+    assert yanto_cfg["a2a"]["agents"] == [
+        {
+            "name": "jono",
+            "url": f"http://127.0.0.1:{default_port}",
+            "description": "jono Hermes profile",
+            "enabled": True,
+            "tags": ["local"],
+            "trust_level": "trusted",
+            "auth_token": default_cfg["a2a"]["server"]["auth_token"],
+        }
+    ]
+    assert "A2A_AUTH_TOKEN=" not in (default_home / ".env").read_text(encoding="utf-8")
+    assert "A2A_AUTH_TOKEN=" not in (yanto_home / ".env").read_text(encoding="utf-8")
 
 
 def test_install_preserves_existing_webhook_port_when_env_not_set(tmp_path):

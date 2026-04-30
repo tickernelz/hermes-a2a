@@ -26,6 +26,8 @@ class WizardAnswers:
     wake_actor_id: str = ""
     wake_actor_name: str = "user"
     remote_agents: list[dict[str, Any]] = field(default_factory=list)
+    auth_token: str = ""
+    wake_secret: str = ""
 
 
 def _ask(prompt_fn: PromptFn, question: str, default: str) -> str:
@@ -37,39 +39,38 @@ def _confirm(confirm_fn: ConfirmFn, question: str, default: bool) -> bool:
     return confirm_fn(question, default)
 
 
+def _session_ref_from_answers(answers: WizardAnswers) -> Any:
+    if not answers.wake_platform or not answers.wake_chat_id:
+        return None
+    ref: dict[str, Any] = {"platform": answers.wake_platform, "chat_id": answers.wake_chat_id}
+    if answers.wake_thread_id:
+        ref["thread_id"] = int(answers.wake_thread_id) if answers.wake_thread_id.isdigit() else answers.wake_thread_id
+    return ref
+
+
 def build_canonical_a2a_from_answers(answers: WizardAnswers, *, auth_token: str, wake_secret: str) -> dict[str, Any]:
+    server: dict[str, Any] = {"port": answers.port}
+    if answers.host and answers.host != "127.0.0.1":
+        server["host"] = answers.host
+    default_public_url = f"http://{answers.host or '127.0.0.1'}:{answers.port}".rstrip("/")
+    public_url = (answers.public_url or default_public_url).rstrip("/")
+    if public_url != default_public_url:
+        server["public_url"] = public_url
+    if answers.require_auth is not True:
+        server["require_auth"] = answers.require_auth
+
+    wake: dict[str, Any] = {"port": answers.webhook_port}
+    if answers.wake_enabled is False:
+        wake["enabled"] = False
+    session_ref = _session_ref_from_answers(answers)
+    if session_ref:
+        wake["session_ref"] = session_ref
+
     a2a: dict[str, Any] = {
         "enabled": True,
         "identity": {"name": answers.identity_name, "description": answers.identity_description},
-        "server": {
-            "host": answers.host,
-            "port": answers.port,
-            "public_url": answers.public_url.rstrip("/"),
-            "require_auth": answers.require_auth,
-        },
-        "wake": {
-            "enabled": answers.wake_enabled,
-            "port": answers.webhook_port,
-            "route": "a2a_trigger",
-            "prompt": "[A2A trigger]",
-            "mode": "owner_session",
-        },
-        "dashboard": {"enabled": True, "route": "a2a_dashboard"},
-        "runtime": {
-            "sync_response_timeout_seconds": 120,
-            "active_task_timeout_seconds": 7200,
-            "max_pending_tasks": 10,
-        },
-        "security": {
-            "allow_unconfigured_urls": False,
-            "redact_outbound": True,
-            "max_message_chars": 50000,
-            "max_response_chars": 100000,
-            "max_request_bytes": 1048576,
-            "max_raw_part_bytes": 262144,
-            "max_parts": 20,
-            "rate_limit_per_minute": 20,
-        },
+        "server": server,
+        "wake": wake,
     }
     if answers.secret_store == "env":
         a2a["server"]["auth_token_env"] = "A2A_AUTH_TOKEN"
@@ -77,19 +78,6 @@ def build_canonical_a2a_from_answers(answers: WizardAnswers, *, auth_token: str,
     else:
         a2a["server"]["auth_token"] = auth_token
         a2a["wake"]["secret"] = wake_secret
-    if answers.wake_platform and answers.wake_chat_id:
-        session: dict[str, Any] = {
-            "platform": answers.wake_platform,
-            "chat_id": answers.wake_chat_id,
-            "chat_type": answers.wake_chat_type or "dm",
-            "actor": {
-                "id": answers.wake_actor_id or answers.wake_chat_id,
-                "name": answers.wake_actor_name or "user",
-            },
-        }
-        if answers.wake_thread_id:
-            session["thread_id"] = int(answers.wake_thread_id) if answers.wake_thread_id.isdigit() else answers.wake_thread_id
-        a2a["wake"]["session"] = session
     if answers.remote_agents:
         agents = []
         for raw in answers.remote_agents:
@@ -110,6 +98,40 @@ def build_canonical_a2a_from_answers(answers: WizardAnswers, *, auth_token: str,
     return a2a
 
 
+def _parse_choice_tokens(raw: str) -> list[str]:
+    return [part.strip() for part in raw.replace(";", ",").split(",") if part.strip()]
+
+
+def _select_local_agents(raw: str, choices: list[dict[str, Any]], reciprocal: bool) -> list[dict[str, Any]]:
+    selected: list[dict[str, Any]] = []
+    for token in _parse_choice_tokens(raw):
+        match = None
+        if token.isdigit():
+            index = int(token) - 1
+            if 0 <= index < len(choices):
+                match = choices[index]
+        if match is None:
+            wanted = token.lower()
+            for choice in choices:
+                if wanted in {str(choice.get("profile_name", "")).lower(), str(choice.get("name", "")).lower()}:
+                    match = choice
+                    break
+        if match is None:
+            continue
+        agent = {
+            "name": match["name"],
+            "url": match["url"].rstrip("/"),
+            "description": match.get("description", ""),
+            "auth_token": match.get("auth_token", ""),
+            "tags": match.get("tags", ["local"]),
+            "trust_level": match.get("trust_level", "trusted"),
+            "reciprocal_home": str(match.get("home", "")),
+            "reciprocal": reciprocal,
+        }
+        selected.append(agent)
+    return selected
+
+
 def collect_wizard_answers(
     *,
     profile_name: str,
@@ -117,6 +139,7 @@ def collect_wizard_answers(
     default_webhook_port: int,
     prompt_fn: PromptFn,
     confirm_fn: ConfirmFn,
+    local_agent_choices: list[dict[str, Any]] | None = None,
 ) -> WizardAnswers:
     name_default = "primary_agent" if profile_name == "default" else profile_name.replace("hermes_", "").replace("-", "_")
     identity_name = _ask(prompt_fn, "A2A agent name", name_default)
@@ -145,8 +168,25 @@ def collect_wizard_answers(
             wake_chat_type = _ask(prompt_fn, "Wake chat type", "group" if wake_platform == "discord" else "dm")
             if wake_platform == "telegram":
                 wake_thread_id = _ask(prompt_fn, "Telegram thread/topic ID (optional)", "")
-            wake_actor_id = _ask(prompt_fn, "Wake actor ID (session selector, not allowlist)", wake_chat_id)
+            wake_actor_id = _ask(prompt_fn, "Wake actor ID (your Discord/Telegram user ID; session selector, not auth)", wake_chat_id)
             wake_actor_name = _ask(prompt_fn, "Wake actor name", "user")
+    remote_agents: list[dict[str, Any]] = []
+    if local_agent_choices:
+        selection = _ask(prompt_fn, "Connect local A2A profiles (comma numbers/names, blank none)", "")
+        reciprocal = _confirm(confirm_fn, "Also write reciprocal links to selected local profiles", True) if selection else False
+        remote_agents.extend(_select_local_agents(selection, local_agent_choices, reciprocal))
+    if _confirm(confirm_fn, "Add manual remote A2A agent", False):
+        remote_name = _ask(prompt_fn, "Remote agent alias", "")
+        remote_url = _ask(prompt_fn, "Remote agent URL", "")
+        if remote_name and remote_url:
+            remote_agents.append({
+                "name": remote_name,
+                "url": remote_url.rstrip("/"),
+                "description": _ask(prompt_fn, "Remote agent description", ""),
+                "auth_token": _ask(prompt_fn, "Remote agent bearer token (optional)", ""),
+                "tags": ["manual"],
+                "trust_level": "trusted",
+            })
     return WizardAnswers(
         identity_name=identity_name,
         identity_description=identity_description,
@@ -163,4 +203,5 @@ def collect_wizard_answers(
         wake_thread_id=wake_thread_id,
         wake_actor_id=wake_actor_id,
         wake_actor_name=wake_actor_name,
+        remote_agents=remote_agents,
     )

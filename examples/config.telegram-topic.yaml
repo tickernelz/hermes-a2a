@@ -8,26 +8,12 @@ a2a:
     name: mobile_agent
     description: Hermes A2A profile using a Telegram topic
   server:
-    host: 127.0.0.1
     port: 41731
-    public_url: http://127.0.0.1:41731
-    require_auth: true
     auth_token: "[REDACTED]"
   wake:
-    enabled: true
     port: 47644
     secret: "[REDACTED]"
-    route: a2a_trigger
-    prompt: "[A2A trigger]"
-    mode: owner_session
-    session:
+    session_ref:
       platform: telegram
       chat_id: "<telegram-chat-id>"
       thread_id: "<optional-topic-thread-id>"
-      chat_type: dm
-      actor:
-        id: "<telegram-user-id>"
-        name: "<display-name>"
-  dashboard:
-    enabled: true
-    route: a2a_dashboard
