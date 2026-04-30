@@ -17,6 +17,7 @@ except Exception:
 
 from . import __version__ as CLI_VERSION
 from .installer import InstallError, install_profile, uninstall_profile
+from .state import StateError, build_install_state, load_state, state_path, write_state
 
 SCHEMA_VERSION = 1
 STATE_DIR_NAME = "a2a"
@@ -92,25 +93,6 @@ def load_yaml(path: Path) -> dict[str, Any]:
     return data
 
 
-def write_json(path: Path, data: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
-
-
-def load_json(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise CliError(f"Invalid state file {path}: {exc}") from exc
-    if not isinstance(data, dict):
-        raise CliError(f"State file {path} must contain an object")
-    return data
-
-
 def read_plugin_version(plugin_dir: Path) -> str | None:
     plugin_yaml = plugin_dir / "plugin.yaml"
     if not plugin_yaml.exists() or yaml is None:
@@ -162,8 +144,8 @@ def profile_name_for_home(home: Path) -> str:
 def inspect_status(home: Path) -> dict[str, Any]:
     config = load_yaml(home / "config.yaml")
     plugin_dir = home / "plugins" / "a2a"
-    state_path = home / STATE_DIR_NAME / STATE_FILE_NAME
-    state = load_json(state_path)
+    path = state_path(home)
+    state = load_state(home)
     a2a_config = config.get("a2a") if isinstance(config.get("a2a"), dict) else {}
     server = a2a_config.get("server") if isinstance(a2a_config.get("server"), dict) else {}
     plugins = config.get("plugins") if isinstance(config.get("plugins"), dict) else {}
@@ -173,7 +155,7 @@ def inspect_status(home: Path) -> dict[str, Any]:
         "installed": plugin_dir.exists(),
         "plugin_dir": str(plugin_dir),
         "plugin_version": read_plugin_version(plugin_dir),
-        "state_path": str(state_path),
+        "state_path": str(path),
         "state": state,
         "config": {
             "plugin_enabled": "a2a" in enabled_plugins,
@@ -221,7 +203,7 @@ def install_payload(home: Path, *, dry_run: bool) -> dict[str, Any]:
     load_yaml(config_path)
     plugin_source = repo_root() / "plugin"
     dashboard_source = repo_root() / "dashboard"
-    state_path = home / STATE_DIR_NAME / STATE_FILE_NAME
+    path = state_path(home)
     version = source_plugin_version()
     plan = ["install plugin payload", "update profile config/env", "write profile state manifest", "no gateway restart"]
     result = install_profile(home, plugin_source, dashboard_source, dry_run=dry_run)
@@ -238,19 +220,15 @@ def install_payload(home: Path, *, dry_run: bool) -> dict[str, Any]:
     stamp = time.strftime("%Y%m%d%H%M%S")
     backup_root = home / STATE_DIR_NAME / "backups" / stamp
     backed_up = []
-    target = backup_path(state_path, backup_root)
+    target = backup_path(path, backup_root)
     if target is not None:
         backed_up.append(str(target))
-    state = {
-        "schema_version": SCHEMA_VERSION,
-        "installed_version": version,
-        "source": {"type": "local_checkout", "path": str(repo_root()), "commit": git_commit()},
-        "migration_version": version,
-        "last_backup": stamp if backed_up else None,
-        "migration_ledger": [{"id": f"install_{version.replace('.', '_')}", "from": None, "to": version, "status": "success", "backup_id": stamp if backed_up else None}],
-        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-    }
-    write_json(state_path, state)
+    state = build_install_state(
+        installed_version=version,
+        source={"type": "local_checkout", "path": str(repo_root()), "commit": git_commit()},
+        backup_id=stamp if backed_up else None,
+    )
+    write_state(home, state)
     return {
         "command": "install",
         "dry_run": False,
@@ -258,7 +236,7 @@ def install_payload(home: Path, *, dry_run: bool) -> dict[str, Any]:
         "restart_required": True,
         "profile": profile_payload(home),
         "plan": plan,
-        "state_path": str(state_path),
+        "state_path": str(path),
         "backup_id": stamp if backed_up else None,
         "messages": result["messages"],
     }
@@ -345,7 +323,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return args.func(args)
-    except (CliError, InstallError) as exc:
+    except (CliError, InstallError, StateError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
 
