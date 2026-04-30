@@ -45,6 +45,10 @@ def task_store_path() -> Path:
     return plugin_state_dir() / "a2a_tasks.json"
 
 
+def task_db_path() -> Path:
+    return plugin_state_dir() / "a2a_tasks.sqlite3"
+
+
 def audit_log_path() -> Path:
     return plugin_state_dir() / "a2a_audit.jsonl"
 

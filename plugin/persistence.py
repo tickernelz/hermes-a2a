@@ -84,8 +84,9 @@ def save_exchange(
     entry = "\n".join(entry_lines)
 
     with _lock:
-        existing = filepath.read_text(encoding="utf-8") if filepath.exists() else ""
-        _atomic_write(filepath, existing + entry)
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+        with open(filepath, "a", encoding="utf-8") as f:
+            f.write(entry)
 
     return filepath
 
@@ -95,40 +96,25 @@ def update_exchange(
     task_id: str,
     inbound_text: str,
 ) -> bool:
-    """Update the inbound text of an existing exchange (e.g. replace 'waiting' with actual reply)."""
+    """Append a final update event for an existing or cross-day background exchange."""
     inbound_text = _truncate_text(filter_outbound(inbound_text))
     safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in agent_name.lower())
     now = datetime.now(timezone.utc)
     today = now.strftime("%Y-%m-%d")
+    timestamp = now.strftime("%H:%M:%S")
     filepath = conversation_dir() / safe_name / f"{today}.md"
-
-    if not filepath.exists():
-        return False
-
-    with _lock:
-        content = filepath.read_text(encoding="utf-8")
-        # Find the entry with this task_id and replace the waiting placeholder
-        marker = f"task:{task_id}"
-        start = content.find(marker)
-        if start == -1:
-            return False
-        block_start = content.rfind("## ", 0, start)
-        if block_start == -1:
-            return False
-        block_end = content.find("\n---\n", block_start)
-        if block_end == -1:
-            block_end = len(content)
-        else:
-            block_end += len("\n---\n")
-
-        block = content[block_start:block_end]
-        updated_block = block.replace(
-            f"**← {safe_name}:** (waiting for reply…)",
+    entry = "\n".join(
+        [
+            f"## {timestamp} | task:{task_id} | update:completed",
+            "",
             f"**← {safe_name}:** {inbound_text}",
-            1,
-        )
-        if updated_block == block:
-            return False
-        updated = content[:block_start] + updated_block + content[block_end:]
-        _atomic_write(filepath, updated)
+            "",
+            "---",
+            "",
+        ]
+    )
+    with _lock:
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+        with open(filepath, "a", encoding="utf-8") as f:
+            f.write(entry)
     return True
