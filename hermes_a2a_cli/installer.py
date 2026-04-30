@@ -8,6 +8,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .state import STATE_DIR_NAME
+
 try:
     import yaml
 except Exception:
@@ -45,14 +47,44 @@ def write_text(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
-def backup(path: Path) -> Path | None:
+def move_stale_plugin_backups(home: Path) -> list[str]:
+    plugins_dir = home / "plugins"
+    if not plugins_dir.is_dir():
+        return []
+    moved: list[str] = []
+    stamp = time.strftime("%Y%m%d%H%M%S")
+    root = home / STATE_DIR_NAME / "backups" / stamp / "plugin-discovery-quarantine"
+    for stale in sorted(plugins_dir.glob("a2a.bak.*")):
+        if not stale.is_dir():
+            continue
+        root.mkdir(parents=True, exist_ok=True)
+        target = root / stale.name
+        counter = 1
+        while target.exists():
+            target = root / f"{stale.name}.{counter}"
+            counter += 1
+        shutil.move(str(stale), str(target))
+        moved.append(str(target))
+    return moved
+
+
+def backup(path: Path, *, home: Path | None = None) -> Path | None:
     if not path.exists():
         return None
     stamp = time.strftime("%Y%m%d%H%M%S")
-    target = path.with_name(f"{path.name}.bak.{stamp}")
+    if path.name == "a2a" and path.parent.name == "plugins" and home is not None:
+        root = home / STATE_DIR_NAME / "backups" / stamp
+        root.mkdir(parents=True, exist_ok=True)
+        target = root / path.name
+    else:
+        target = path.with_name(f"{path.name}.bak.{stamp}")
     counter = 1
+    base_target = target
     while target.exists():
-        target = path.with_name(f"{path.name}.bak.{stamp}.{counter}")
+        if path.name == "a2a" and path.parent.name == "plugins" and home is not None:
+            target = base_target.with_name(f"{base_target.name}.{counter}")
+        else:
+            target = path.with_name(f"{path.name}.bak.{stamp}.{counter}")
         counter += 1
     if path.is_dir():
         shutil.copytree(path, target)
@@ -276,8 +308,9 @@ def install_profile(home: Path, source_dir: Path, dashboard_dir: Path, *, dry_ru
         return {"changed": False, "plan": plan, "messages": ["DRY RUN: no files will be modified", f"Would install plugin to {plugin_dir}", f"Would update {config_path}", f"Would update {env_path}"]}
 
     backups: list[str] = []
+    backups.extend(move_stale_plugin_backups(home))
     for path in (plugin_dir, config_path, env_path):
-        target = backup(path)
+        target = backup(path, home=home)
         if target is not None:
             backups.append(str(target))
 
